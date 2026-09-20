@@ -116,7 +116,7 @@ void app_main(void)
   // FB brake factor default should be fine so dont do anything
 
   // Set rated voltage to 3V
-  i2c_write_reg(dev_handle, 0x16, 142);
+  i2c_write_reg(dev_handle, 0x16, 0x75);
 
   uint8_t ctrl3 = i2c_read_reg(dev_handle, 0x1D);
   
@@ -195,5 +195,7 @@ void app_main(void)
   }
   
   ESP_LOGI(TAG, "Calibration successful!");
-  for (;;);
+  for (;;) {
+    vTaskDelay(pdMS_TO_TICKS(100));
+  }
 }
