@@ -6,4 +6,6 @@ idf_component_register(
     log
     esp_driver_gpio
     esp_driver_i2c
+
+    board
 )
