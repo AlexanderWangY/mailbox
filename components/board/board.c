@@ -6,6 +6,7 @@
 #include "driver/gpio.h"
 #include "freertos/projdefs.h"
 #include "hal/gpio_types.h"
+#include "nvs_flash.h"
 #include <stdint.h>
 #include <stdio.h>
 #include "board.h"
@@ -38,10 +39,13 @@ static void led_init(void) {
 }
 
 void init_board(void) {
-    ESP_LOGI(TAG, "Initializing LED.");
-    led_init();
-    ESP_LOGI(TAG, "Initializing STEMMA QT power.");
-    stemma_power_init();
+  ESP_LOGI(TAG, "Initializing LED.");
+  led_init();
+  ESP_LOGI(TAG, "Initializing STEMMA QT power.");
+  stemma_power_init();
+
+  // Initialize NVS Flash (used by haptics for reading calibration vals from memory)
+  ESP_ERROR_CHECK(nvs_flash_init());
 
   i2c_master_bus_config_t i2c_mst_config = {
     .clk_source = I2C_CLK_SRC_DEFAULT,
