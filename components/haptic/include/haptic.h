@@ -13,3 +13,5 @@ esp_err_t load_calib(HapticCalibration *calib);
 // Saves result into calib
 esp_err_t run_calib(HapticCalibration *calib);
 void haptic_init(void);
+
+esp_err_t haptic_play(uint8_t effect);

@@ -6,6 +6,7 @@
 #include "driver/gpio.h"
 #include "freertos/projdefs.h"
 #include "hal/gpio_types.h"
+#include "haptic.h"
 #include "nvs_flash.h"
 #include <stdint.h>
 #include <stdio.h>
@@ -59,6 +60,8 @@ void init_board(void) {
   ESP_ERROR_CHECK(
     i2c_new_master_bus(&i2c_mst_config, &i2c_bus)
   );
+
+  haptic_init();
 }
 
 void i2c_attach_device(i2c_device_config_t cfg, i2c_master_dev_handle_t *handle) {
