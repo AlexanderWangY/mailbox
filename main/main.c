@@ -2,14 +2,13 @@
 #include "freertos/FreeRTOS.h"
 #include "board.h"
 #include "freertos/projdefs.h"
-#include "haptic.h"
+#include "display.h"
 #include <stdint.h>
 
 void app_main(void)
 {
   init_board();
-  ESP_ERROR_CHECK(haptic_play(16));
-  ESP_ERROR_CHECK(haptic_play(16));
+  display_init();
   for (;;) {
     vTaskDelay(pdMS_TO_TICKS(2000));
   }

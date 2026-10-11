@@ -1,5 +1,6 @@
 #include "driver/i2c_master.h"
 #include "driver/i2c_types.h"
+#include "driver/spi_common.h"
 #include "esp_err.h"
 #include "esp_log.h"
 #include "freertos/FreeRTOS.h"
@@ -14,9 +15,14 @@
 
 #define LED_GPIO GPIO_NUM_13
 #define STEMMA_POWER GPIO_NUM_2
+#define LCD_BOOST_EN_GPIO GPIO_NUM_25
 
 #define I2C_SDA_GPIO GPIO_NUM_22
 #define I2C_SCL_GPIO GPIO_NUM_20
+
+#define SPI_SCLK_GPIO GPIO_NUM_5
+#define SPI_MOSI_GPIO GPIO_NUM_19
+#define SPI_MAX_TRANSFER_SIZE (320 * 80 * sizeof(uint16_t))
 
 #define DRV2605L_ADDR 0x5A
 #define DRV2605L_MODE 0x01
@@ -26,6 +32,20 @@
 
 static i2c_master_bus_handle_t i2c_bus;
 static const char *TAG = "mailbox";
+
+static esp_err_t board_spi_bus_init(void) {
+  ESP_LOGI(TAG, "SPI pins: SCLK=%d MOSI=%d MISO=NC, max transfer=%d bytes.",
+    SPI_SCLK_GPIO, SPI_MOSI_GPIO, SPI_MAX_TRANSFER_SIZE);
+  spi_bus_config_t buscfg = {
+    .sclk_io_num = SPI_SCLK_GPIO,
+    .mosi_io_num = SPI_MOSI_GPIO,
+    .miso_io_num = GPIO_NUM_NC,
+    .quadwp_io_num = GPIO_NUM_NC,
+    .quadhd_io_num = GPIO_NUM_NC,
+    .max_transfer_sz = SPI_MAX_TRANSFER_SIZE,
+  };
+  return spi_bus_initialize(BOARD_SPI_HOST, &buscfg, SPI_DMA_CH_AUTO);
+}
 
 static void stemma_power_init(void) {
   gpio_reset_pin(STEMMA_POWER);
@@ -39,7 +59,19 @@ static void led_init(void) {
   gpio_set_direction(LED_GPIO, GPIO_MODE_OUTPUT);
 }
 
+static void lcd_power_init(void) {
+  ESP_ERROR_CHECK(gpio_reset_pin(LCD_BOOST_EN_GPIO));
+  ESP_ERROR_CHECK(gpio_set_direction(LCD_BOOST_EN_GPIO, GPIO_MODE_OUTPUT));
+  ESP_ERROR_CHECK(gpio_set_level(LCD_BOOST_EN_GPIO, 1));
+  vTaskDelay(pdMS_TO_TICKS(10));
+}
+
 void init_board(void) {
+  ESP_LOGI(TAG, "Enabling LCD boost converter.");
+  lcd_power_init();
+  ESP_LOGI(TAG, "Initializing SPI bus on host %d.", BOARD_SPI_HOST);
+  ESP_ERROR_CHECK(board_spi_bus_init());
+  ESP_LOGI(TAG, "SPI bus initialized.");
   ESP_LOGI(TAG, "Initializing LED.");
   led_init();
   ESP_LOGI(TAG, "Initializing STEMMA QT power.");
