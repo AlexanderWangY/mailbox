@@ -1,5 +1,7 @@
 idf_component_register(
-  SRCS "display.c"
+  SRCS
+    "display.c"
+    "ui.c"
   INCLUDE_DIRS "include"
   REQUIRES
     freertos

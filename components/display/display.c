@@ -1,3 +1,4 @@
+#include <stddef.h>
 #include <stdint.h>
 #include "board.h"
 #include "display.h"
@@ -11,18 +12,24 @@
 #include "esp_lcd_st7796.h"
 #include "esp_lcd_types.h"
 
+#define LCD_BACKLIGHT_GPIO GPIO_NUM_26
+#define BUFFER_SIZE (LCD_WIDTH * LCD_TRANSFER_LINES)
+
 static esp_lcd_panel_handle_t panel_handle = NULL;
 static const char *TAG = "display";
-static uint16_t color_buffer[LCD_WIDTH * LCD_TRANSFER_LINES];
 
-#define LCD_RED_RGB565 0xF800
-#define LCD_GREEN_RGB565 0x07E0
-#define LCD_BLUE_RGB565 0x001F
+// We write up to LCD_TRANSFER_LINES at time.
+// at 480 * 40, we have 19,200 entries at 2 bytes each so, 38,400 bytes
+// 38.4 KB, which is fine i think
+static display_color_t buffer[BUFFER_SIZE];
 
-#define LCD_BACKLIGHT_GPIO GPIO_NUM_26
+
+display_color_t rgb656(uint8_t r, uint8_t g, uint8_t b) {
+  return ((r >> 3) << 11 ) | ((g >> 2) << 5) | (b >> 3);
+}
 
 void display_init(void) {
-  // reseting and pulling backlight to high
+  // reset and pull backlight to high
   ESP_ERROR_CHECK(gpio_reset_pin(LCD_BACKLIGHT_GPIO));
   ESP_ERROR_CHECK(gpio_set_direction(LCD_BACKLIGHT_GPIO, GPIO_MODE_OUTPUT));
   ESP_ERROR_CHECK(gpio_set_level(LCD_BACKLIGHT_GPIO, 1));
@@ -60,26 +67,31 @@ void display_init(void) {
   ESP_ERROR_CHECK(esp_lcd_panel_swap_xy(panel_handle, true));
   ESP_ERROR_CHECK(esp_lcd_panel_disp_on_off(panel_handle, true));
   ESP_LOGI(TAG, "Display initialized.");
-
-
-  // Do a simpel RGB screen test
-  // TODO: remove this since this is just a test
-  for (int row = 0; row < LCD_TRANSFER_LINES; ++row) {
-    for (int x = 0; x < LCD_WIDTH; ++x) {
-      uint16_t color = x < LCD_WIDTH / 3 ? LCD_RED_RGB565
-        : (x < (2 * LCD_WIDTH) / 3 ? LCD_BLUE_RGB565 : LCD_GREEN_RGB565);
-      color_buffer[row * LCD_WIDTH + x] = color;
-    }
-  }
-
-  for (int y = 0; y < LCD_HEIGHT; y += LCD_TRANSFER_LINES) {
-    ESP_ERROR_CHECK(esp_lcd_panel_draw_bitmap(
-      panel_handle,
-      0,
-      y,
-      LCD_WIDTH,
-      y + LCD_TRANSFER_LINES,
-      color_buffer
-    ));
-  }
 }
+
+void display_sleep(void) {
+  ESP_ERROR_CHECK(gpio_set_level(LCD_BACKLIGHT_GPIO, 0));
+  ESP_ERROR_CHECK(esp_lcd_panel_disp_sleep(panel_handle, true));
+  ESP_LOGI(TAG, "Display is now asleep");
+}
+
+void display_wake(void) {
+  ESP_ERROR_CHECK(esp_lcd_panel_disp_sleep(panel_handle, false));
+  ESP_ERROR_CHECK(gpio_set_level(LCD_BACKLIGHT_GPIO, 1));
+  ESP_LOGI(TAG, "Display is now awake");
+}
+
+void display_clear(display_color_t color) {
+  // Fill buffer, with color, then just iterate until height is done times
+  for (size_t i = 0; i < BUFFER_SIZE; i++) {
+    buffer[i] = color;
+  }
+
+  for (size_t i = 0; i < LCD_HEIGHT; i += LCD_TRANSFER_LINES) {
+    ESP_ERROR_CHECK(
+      esp_lcd_panel_draw_bitmap(panel_handle, 0, i, LCD_WIDTH, i + LCD_TRANSFER_LINES, buffer)
+    );
+  }
+};
+
+

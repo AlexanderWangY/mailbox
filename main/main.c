@@ -10,6 +10,9 @@ void app_main(void)
   init_board();
   display_init();
   for (;;) {
+    display_sleep();
+    vTaskDelay(pdMS_TO_TICKS(2000));
+    display_wake();
     vTaskDelay(pdMS_TO_TICKS(2000));
   }
 }
