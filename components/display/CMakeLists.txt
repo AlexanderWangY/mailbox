@@ -11,4 +11,6 @@ idf_component_register(
     board
     esp_lcd
     esp_lcd_st7796
+    lvgl
+    esp_lvgl_port
 )

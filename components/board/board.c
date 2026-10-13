@@ -22,7 +22,7 @@
 
 #define SPI_SCLK_GPIO GPIO_NUM_5
 #define SPI_MOSI_GPIO GPIO_NUM_19
-#define SPI_MAX_TRANSFER_SIZE (320 * 80 * sizeof(uint16_t))
+#define SPI_MAX_TRANSFER_SIZE (480 * 80 * sizeof(uint16_t))
 
 #define DRV2605L_ADDR 0x5A
 #define DRV2605L_MODE 0x01

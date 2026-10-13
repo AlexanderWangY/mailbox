@@ -11,22 +11,27 @@
 #include "esp_lcd_panel_ops.h"
 #include "esp_lcd_st7796.h"
 #include "esp_lcd_types.h"
+#include "esp_lvgl_port.h"
+#include "esp_lvgl_port_disp.h"
+#include "freertos/FreeRTOS.h"
+#include "freertos/semphr.h"
+#include "include/lvgl/core/lv_obj_pos.h"
+#include "include/lvgl/core/lv_obj_style_gen.h"
+#include "include/lvgl/core/lv_obj_tree.h"
+#include "include/lvgl/core/lv_refr.h"
+#include "include/lvgl/core/lv_style_gen.h"
+#include "include/lvgl/display/lv_display.h"
+#include "include/lvgl/draw/lv_color.h"
+#include "include/lvgl/lv_types.h"
+#include "include/lvgl/widgets/lv_label.h"
 
 #define LCD_BACKLIGHT_GPIO GPIO_NUM_26
-#define BUFFER_SIZE (LCD_WIDTH * LCD_TRANSFER_LINES)
+#define BUFFER_SIZE (LCD_WIDTH * LCD_TRANSFER_LINES * sizeof(uint16_t))
 
+static lv_display_t *lv_disp;
 static esp_lcd_panel_handle_t panel_handle = NULL;
+static esp_lcd_panel_io_handle_t io_handle = NULL;
 static const char *TAG = "display";
-
-// We write up to LCD_TRANSFER_LINES at time.
-// at 480 * 40, we have 19,200 entries at 2 bytes each so, 38,400 bytes
-// 38.4 KB, which is fine i think
-static display_color_t buffer[BUFFER_SIZE];
-
-
-display_color_t rgb656(uint8_t r, uint8_t g, uint8_t b) {
-  return ((r >> 3) << 11 ) | ((g >> 2) << 5) | (b >> 3);
-}
 
 void display_init(void) {
   // reset and pull backlight to high
@@ -34,11 +39,11 @@ void display_init(void) {
   ESP_ERROR_CHECK(gpio_set_direction(LCD_BACKLIGHT_GPIO, GPIO_MODE_OUTPUT));
   ESP_ERROR_CHECK(gpio_set_level(LCD_BACKLIGHT_GPIO, 1));
 
-  esp_lcd_panel_io_handle_t io_handle = NULL;
+
   esp_lcd_panel_io_spi_config_t io_cfg = {
     .dc_gpio_num = GPIO_NUM_14,
     .cs_gpio_num = GPIO_NUM_27,
-    .pclk_hz = 20 * 1000 * 1000,
+    .pclk_hz = 40 * 1000 * 1000,
     .spi_mode = 0,
     .trans_queue_depth = 10,
     .lcd_cmd_bits = 8,
@@ -66,32 +71,67 @@ void display_init(void) {
   ESP_LOGI(TAG, "Setting landscape orientation (480x320).");
   ESP_ERROR_CHECK(esp_lcd_panel_swap_xy(panel_handle, true));
   ESP_ERROR_CHECK(esp_lcd_panel_disp_on_off(panel_handle, true));
+  ESP_LOGI(TAG, "Hooking LVGL display initialization.");
+  lvgl_port_cfg_t lvgl_cfg = ESP_LVGL_PORT_INIT_CONFIG();
+  ESP_ERROR_CHECK(lvgl_port_init(&lvgl_cfg));
+  lvgl_port_display_cfg_t disp_cfg = {
+    .io_handle = io_handle,
+    .panel_handle = panel_handle,
+    .buffer_size = BUFFER_SIZE,
+    .double_buffer = true,
+    .hres = LCD_WIDTH,
+    .vres = LCD_HEIGHT,
+    .rotation = {
+      .swap_xy = true,
+    },
+    .flags = {
+      .buff_dma = true,
+      .swap_bytes = true,
+    },
+  };
+  lv_disp = lvgl_port_add_disp(&disp_cfg);
+
+  if (lvgl_port_lock(0)) {
+    lv_obj_t *scr = lv_screen_active();
+    lv_obj_set_style_bg_color(scr, lv_color_white(), 0);
+    lv_obj_set_style_bg_opa(scr, LV_OPA_COVER, 0);
+    lv_refr_now(lv_disp);
+    lvgl_port_unlock();
+  }
+  ESP_LOGI(TAG, "LVGL initialized.");
   ESP_LOGI(TAG, "Display initialized.");
 }
 
 void display_sleep(void) {
   ESP_ERROR_CHECK(gpio_set_level(LCD_BACKLIGHT_GPIO, 0));
+  lvgl_port_stop();
   ESP_ERROR_CHECK(esp_lcd_panel_disp_sleep(panel_handle, true));
   ESP_LOGI(TAG, "Display is now asleep");
 }
 
 void display_wake(void) {
   ESP_ERROR_CHECK(esp_lcd_panel_disp_sleep(panel_handle, false));
-  ESP_ERROR_CHECK(gpio_set_level(LCD_BACKLIGHT_GPIO, 1));
+  lvgl_port_resume();
+
+  if (lvgl_port_lock(0)) {
+    lv_obj_invalidate(lv_screen_active());
+    lvgl_port_unlock();
+  }
+
+  ESP_ERROR_CHECK(gpio_set_level(LCD_BACKLIGHT_GPIO, 1));  
   ESP_LOGI(TAG, "Display is now awake");
 }
 
-void display_clear(display_color_t color) {
-  // Fill buffer, with color, then just iterate until height is done times
-  for (size_t i = 0; i < BUFFER_SIZE; i++) {
-    buffer[i] = color;
-  }
-
-  for (size_t i = 0; i < LCD_HEIGHT; i += LCD_TRANSFER_LINES) {
-    ESP_ERROR_CHECK(
-      esp_lcd_panel_draw_bitmap(panel_handle, 0, i, LCD_WIDTH, i + LCD_TRANSFER_LINES, buffer)
-    );
-  }
+void display_clear() {
+  lvgl_port_lock(0);
+  lv_obj_clean(lv_screen_active());
+  lvgl_port_unlock();
 };
 
+void display_text(const char *text) {
+  lv_obj_t *label = lv_label_create(lv_screen_active());
+  lv_label_set_text(label, text);
+  lv_obj_set_style_text_color(label, lv_color_black(), 0);
+  lv_obj_center(label);
+};
 
