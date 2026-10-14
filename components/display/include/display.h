@@ -1,5 +1,6 @@
 #pragma once
 
+#include <stddef.h>
 #include <stdint.h>
 #define LCD_WIDTH 480
 #define LCD_HEIGHT 320
@@ -13,3 +14,4 @@ void display_wake(void);
 void display_clear(void);
 
 void display_text(const char *text);
+const uint8_t *display_mail_png(size_t *size);

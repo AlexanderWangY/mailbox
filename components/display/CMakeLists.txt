@@ -2,6 +2,9 @@ idf_component_register(
   SRCS
     "display.c"
     "ui.c"
+  EMBED_FILES
+    "assets/Mail.png"
+    "assets/Mail.rgb565"
   INCLUDE_DIRS "include"
   REQUIRES
     freertos

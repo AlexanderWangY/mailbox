@@ -12,26 +12,29 @@
 #include "esp_lcd_st7796.h"
 #include "esp_lcd_types.h"
 #include "esp_lvgl_port.h"
-#include "esp_lvgl_port_disp.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/semphr.h"
+#include "include/lvgl/core/lv_area.h"
 #include "include/lvgl/core/lv_obj_pos.h"
-#include "include/lvgl/core/lv_obj_style_gen.h"
-#include "include/lvgl/core/lv_obj_tree.h"
-#include "include/lvgl/core/lv_refr.h"
-#include "include/lvgl/core/lv_style_gen.h"
 #include "include/lvgl/display/lv_display.h"
 #include "include/lvgl/draw/lv_color.h"
-#include "include/lvgl/lv_types.h"
+#include "include/lvgl/draw/lv_image_dsc.h"
+#include "include/lvgl/font/lv_font.h"
+#include "include/lvgl/widgets/lv_image.h"
 #include "include/lvgl/widgets/lv_label.h"
 
 #define LCD_BACKLIGHT_GPIO GPIO_NUM_26
-#define BUFFER_SIZE (LCD_WIDTH * LCD_TRANSFER_LINES * sizeof(uint16_t))
+#define BUFFER_SIZE (LCD_WIDTH * LCD_TRANSFER_LINES)
 
 static lv_display_t *lv_disp;
 static esp_lcd_panel_handle_t panel_handle = NULL;
 static esp_lcd_panel_io_handle_t io_handle = NULL;
 static const char *TAG = "display";
+
+extern const uint8_t mail_png_start[] asm("_binary_Mail_png_start");
+extern const uint8_t mail_png_end[] asm("_binary_Mail_png_end");
+extern const uint8_t mail_rgb565_start[] asm("_binary_Mail_rgb565_start");
+extern const uint8_t mail_rgb565_end[] asm("_binary_Mail_rgb565_end");
 
 void display_init(void) {
   // reset and pull backlight to high
@@ -56,7 +59,7 @@ void display_init(void) {
   ESP_LOGI(TAG, "Creating LCD panel.");
   esp_lcd_panel_dev_config_t panel_cfg = {
     .reset_gpio_num = GPIO_NUM_32,
-    .rgb_ele_order = LCD_RGB_ELEMENT_ORDER_RGB,
+    .rgb_ele_order = LCD_RGB_ELEMENT_ORDER_BGR,
     .bits_per_pixel = 16,
   };
 
@@ -99,6 +102,9 @@ void display_init(void) {
     lvgl_port_unlock();
   }
   ESP_LOGI(TAG, "LVGL initialized.");
+  size_t mail_png_size;
+  (void)display_mail_png(&mail_png_size);
+  ESP_LOGI(TAG, "Embedded Mail.png (%u bytes)", (unsigned)mail_png_size);
   ESP_LOGI(TAG, "Display initialized.");
 }
 
@@ -129,9 +135,33 @@ void display_clear() {
 };
 
 void display_text(const char *text) {
-  lv_obj_t *label = lv_label_create(lv_screen_active());
-  lv_label_set_text(label, text);
-  lv_obj_set_style_text_color(label, lv_color_black(), 0);
-  lv_obj_center(label);
+  (void)text;
+  if (!lvgl_port_lock(0)) {
+    return;
+  }
+
+  lv_obj_t *screen = lv_screen_active();
+  lv_obj_clean(screen);
+
+  static lv_image_dsc_t mail_image;
+  mail_image.header.magic = LV_IMAGE_HEADER_MAGIC;
+  mail_image.header.cf = LV_COLOR_FORMAT_RGB565;
+  mail_image.header.w = 272;
+  mail_image.header.h = 168;
+  mail_image.header.stride = 272 * sizeof(uint16_t);
+  mail_image.data_size = (uint32_t)(mail_rgb565_end - mail_rgb565_start);
+  mail_image.data = mail_rgb565_start;
+
+  lv_obj_t *image = lv_image_create(screen);
+  lv_image_set_src(image, &mail_image);
+  lv_obj_align(image, LV_ALIGN_CENTER, 0, 0);
+  lvgl_port_unlock();
 };
+
+const uint8_t *display_mail_png(size_t *size) {
+  if (size != NULL) {
+    *size = (size_t)(mail_png_end - mail_png_start);
+  }
+  return mail_png_start;
+}
 
