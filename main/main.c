@@ -4,6 +4,7 @@
 #include "board.h"
 #include "freertos/projdefs.h"
 #include "display.h"
+#include "ui.h"
 #include <math.h>
 #include <stdint.h>
 
@@ -19,7 +20,9 @@ void app_main(void)
 {
   init_board();
   display_init();
-  display_text("Hi pookie, I miss you. I hope you have a good day today and good luck with your interview!");
+  ui_init();
+  ui_draw_reading_screen();
+  ui_set_reading_message("hope you have an amazing day!");
   for (;;) {
     vTaskDelay(pdMS_TO_TICKS(1000));
   }

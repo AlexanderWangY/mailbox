@@ -3,8 +3,10 @@ idf_component_register(
     "display.c"
     "ui.c"
   EMBED_FILES
-    "assets/Mail.png"
+    "assets/FatSnickers.rgb565"
+    "assets/LetterTemplate.rgb565"
     "assets/Mail.rgb565"
+    "assets/star.gif"
   INCLUDE_DIRS "include"
   REQUIRES
     freertos
