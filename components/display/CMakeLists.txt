@@ -1,5 +1,12 @@
 idf_component_register(
-  SRCS "display.c"
+  SRCS
+    "display.c"
+    "ui.c"
+  EMBED_FILES
+    "assets/FatSnickers.rgb565"
+    "assets/LetterTemplate.rgb565"
+    "assets/Mail.rgb565"
+    "assets/star.gif"
   INCLUDE_DIRS "include"
   REQUIRES
     freertos
@@ -9,4 +16,6 @@ idf_component_register(
     board
     esp_lcd
     esp_lcd_st7796
+    lvgl
+    esp_lvgl_port
 )
