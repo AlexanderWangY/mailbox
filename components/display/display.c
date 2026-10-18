@@ -1,7 +1,7 @@
 #include "board.h"
-#include "freertos/FreeRTOS.h"
 #include "display.h"
 #include "driver/gpio.h"
+#include "driver/ledc.h"
 #include "esp_err.h"
 #include "esp_log.h"
 #include "esp_lcd_panel_io.h"
@@ -11,10 +11,10 @@
 #include "esp_lcd_st7796.h"
 #include "esp_lcd_types.h"
 #include "esp_lvgl_port.h"
-#include "freertos/idf_additions.h"
-#include "freertos/projdefs.h"
+#include "hal/ledc_types.h"
 #include "include/lvgl/display/lv_display.h"
-#include "portmacro.h"
+#include "soc/clk_tree_defs.h"
+#include <stdint.h>
 
 #define LCD_BACKLIGHT_GPIO GPIO_NUM_26
 #define BUFFER_SIZE (LCD_WIDTH * LCD_TRANSFER_LINES)
@@ -23,7 +23,7 @@ static esp_lcd_panel_handle_t panel_handle = NULL;
 static esp_lcd_panel_io_handle_t io_handle = NULL;
 static const char *TAG = "display";
 
-static QueueHandle_t display_queue;
+static display_state_t state = DISPLAY_NORMAL;
 
 void display_init(void) {
   // reset and pull backlight to high
@@ -85,19 +85,46 @@ void display_init(void) {
   ESP_LOGI(TAG, "LVGL initialized.");
   ESP_LOGI(TAG, "Display initialized.");
 
-  display_queue = xQueueCreate(16, sizeof(display_cmd_t));
-  ESP_LOGI(TAG, "Display queue initialized.");
+  ledc_timer_config_t timer = {
+    .speed_mode = LEDC_LOW_SPEED_MODE,
+    .timer_num = LEDC_TIMER_0,
+    .duty_resolution = LEDC_TIMER_10_BIT,
+    .freq_hz = 20000,
+    .clk_cfg = LEDC_AUTO_CLK,
+  };
+
+  ESP_ERROR_CHECK(ledc_timer_config(&timer));
+
+  ledc_channel_config_t channel = {
+    .gpio_num = LCD_BACKLIGHT_GPIO,
+    .speed_mode = LEDC_LOW_SPEED_MODE,
+    .channel = LEDC_CHANNEL_0,
+    .timer_sel = LEDC_TIMER_0,
+    .duty = 1023,
+    .hpoint = 0,
+  };
+
+  ESP_ERROR_CHECK(ledc_channel_config(&channel));
+  ESP_LOGI(TAG, "LED PWM configured.");
 }
 
 void display_sleep(void) {
-  ESP_ERROR_CHECK(gpio_set_level(LCD_BACKLIGHT_GPIO, 0));
+  ESP_LOGI(TAG, "Entering sleep; state=%d", (int)state);
+  ESP_ERROR_CHECK(ledc_set_duty(LEDC_LOW_SPEED_MODE, LEDC_CHANNEL_0, 0));
+  ESP_ERROR_CHECK(ledc_update_duty(LEDC_LOW_SPEED_MODE, LEDC_CHANNEL_0));
+  ESP_LOGI(TAG, "Backlight duty set to 0");
   lvgl_port_stop();
+  ESP_LOGI(TAG, "LVGL timer stopped");
+  ESP_ERROR_CHECK(esp_lcd_panel_disp_on_off(panel_handle, false));
+  ESP_LOGI(TAG, "Panel display disabled");
   ESP_ERROR_CHECK(esp_lcd_panel_disp_sleep(panel_handle, true));
+  state = DISPLAY_SLEEP;
   ESP_LOGI(TAG, "Display is now asleep");
 }
 
 void display_wake(void) {
   ESP_ERROR_CHECK(esp_lcd_panel_disp_sleep(panel_handle, false));
+  ESP_ERROR_CHECK(esp_lcd_panel_disp_on_off(panel_handle, true));
   lvgl_port_resume();
 
   if (lvgl_port_lock(0)) {
@@ -105,8 +132,42 @@ void display_wake(void) {
     lvgl_port_unlock();
   }
 
-  ESP_ERROR_CHECK(gpio_set_level(LCD_BACKLIGHT_GPIO, 1));  
+  ESP_ERROR_CHECK(ledc_set_duty(LEDC_LOW_SPEED_MODE, LEDC_CHANNEL_0, 1023));
+  ESP_ERROR_CHECK(ledc_update_duty(LEDC_LOW_SPEED_MODE, LEDC_CHANNEL_0));
+  state = DISPLAY_NORMAL;
   ESP_LOGI(TAG, "Display is now awake");
+}
+
+void display_dim(void) {
+  // Use a clearly visible low brightness so the dim stage is easy to distinguish.
+  uint32_t duty = 1023 * 0.2;
+  ESP_LOGI(TAG, "Dimming backlight: duty=%lu", (unsigned long)duty);
+  ESP_ERROR_CHECK(
+    ledc_set_duty(LEDC_LOW_SPEED_MODE, LEDC_CHANNEL_0, duty)
+  );
+
+  ESP_ERROR_CHECK(
+    ledc_update_duty(LEDC_LOW_SPEED_MODE, LEDC_CHANNEL_0)
+  );
+
+  state = DISPLAY_DIM;
+};
+
+void display_normal(void) {
+  uint32_t duty = 1023;
+  ESP_ERROR_CHECK(
+    ledc_set_duty(LEDC_LOW_SPEED_MODE, LEDC_CHANNEL_0, duty)
+  );
+
+  ESP_ERROR_CHECK(
+    ledc_update_duty(LEDC_LOW_SPEED_MODE, LEDC_CHANNEL_0)
+  );
+
+  state = DISPLAY_NORMAL;
+};
+
+display_state_t display_state(void) {
+  return state;
 }
 
 void display_clear() {
@@ -115,25 +176,3 @@ void display_clear() {
   lvgl_port_unlock();
 };
 
-BaseType_t display_submit_cmd(const display_cmd_t *cmd) {
-  return xQueueSend(display_queue, cmd, pdMS_TO_TICKS(100));
-}
-
-void display_task(void *arg) {
-  (void)arg;
-
-  display_cmd_t cmd;
-
-  for (;;) {
-    while (xQueueReceive(display_queue, &cmd, portMAX_DELAY)) {
-
-      // Process tasks
-      switch (cmd.type) {
-        case DISPLAY_CMD_SET_MESSAGE:
-        case DISPLAY_CMD_SET_SCREEN:
-        default:
-      }      
-    }
-  }
-  
-}
