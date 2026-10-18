@@ -80,6 +80,10 @@ static mail_stars_t mail_stars;
 
 static void refresh_mail_stars(lv_timer_t *timer) {
   mail_stars_t *stars = lv_timer_get_user_data(timer);
+  if (lv_screen_active() != mail_screen) {
+    return;
+  }
+
   for (size_t i = 0; i < 2; i++) {
     lv_obj_invalidate(stars->mirrors[i]);
   }
@@ -116,6 +120,7 @@ static void setup_mail_screen(void) {
   // Basically just make a bunch of version of this gif
   lv_obj_t *gif = lv_gif_create(mail_screen);
   lv_gif_set_color_format(gif, LV_COLOR_FORMAT_ARGB8888);
+  lv_gif_set_auto_pause_invisible(gif, true);
   lv_gif_set_src(gif, &star_gif);
   if (!lv_gif_is_loaded(gif)) {
     ESP_LOGE(TAG, "Could not load star.gif");

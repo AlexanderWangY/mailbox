@@ -13,6 +13,7 @@ idf_component_register(
     log
     esp_driver_gpio
     esp_driver_spi
+    esp_driver_ledc
     board
     esp_lcd
     esp_lcd_st7796
