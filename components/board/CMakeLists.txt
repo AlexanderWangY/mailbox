@@ -8,5 +8,8 @@ idf_component_register(
     esp_driver_i2c
     esp_driver_spi
     nvs_flash
+    esp_wifi
+    esp_event
+    esp_netif
     haptic
 )

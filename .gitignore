@@ -1,5 +1,8 @@
 build
 managed_components/
+**/.env
+**/device_secrets.h
+backend/data/
 
 .vscode
 .helix

@@ -2,16 +2,23 @@
 #include "driver/i2c_types.h"
 #include "driver/spi_common.h"
 #include "esp_err.h"
+#include "esp_event.h"
 #include "esp_log.h"
+#include "esp_netif.h"
+#include "esp_netif_sntp.h"
+#include "esp_wifi.h"
 #include "freertos/FreeRTOS.h"
 #include "driver/gpio.h"
 #include "freertos/projdefs.h"
 #include "hal/gpio_types.h"
 #include "haptic.h"
 #include "nvs_flash.h"
+#include "nvs.h"
+#include <string.h>
 #include <stdint.h>
 #include <stdio.h>
 #include "board.h"
+#include "device_secrets.h"
 
 #define LED_GPIO GPIO_NUM_13
 #define STEMMA_POWER GPIO_NUM_2
@@ -32,6 +39,81 @@
 
 static i2c_master_bus_handle_t i2c_bus;
 static const char *TAG = "mailbox";
+static bool wifi_started;
+
+static void wifi_event_handler(void *arg, esp_event_base_t event_base,
+                               int32_t event_id, void *event_data) {
+  (void)arg;
+  (void)event_data;
+  if (event_base == WIFI_EVENT && event_id == WIFI_EVENT_STA_START) {
+    ESP_LOGI(TAG, "Connecting to configured Wi-Fi network.");
+    esp_err_t err = esp_wifi_connect();
+    if (err != ESP_OK) ESP_LOGE(TAG, "Wi-Fi connect request failed: %s", esp_err_to_name(err));
+  } else if (event_base == WIFI_EVENT && event_id == WIFI_EVENT_STA_DISCONNECTED) {
+    ESP_LOGW(TAG, "Wi-Fi disconnected; retrying.");
+    esp_err_t err = esp_wifi_connect();
+    if (err != ESP_OK) ESP_LOGE(TAG, "Wi-Fi reconnect request failed: %s", esp_err_to_name(err));
+  } else if (event_base == IP_EVENT && event_id == IP_EVENT_STA_GOT_IP) {
+    ip_event_got_ip_t *event = (ip_event_got_ip_t *)event_data;
+    ESP_LOGI(TAG, "Wi-Fi connected; address=" IPSTR, IP2STR(&event->ip_info.ip));
+  }
+}
+
+esp_err_t board_wifi_init(void) {
+  if (wifi_started) return ESP_OK;
+
+  if (strlen(MAILBOX_WIFI_SSID) == 0 || strlen(MAILBOX_WIFI_SSID) >= sizeof(((wifi_config_t *)0)->sta.ssid) ||
+      strlen(MAILBOX_WIFI_PASSWORD) >= sizeof(((wifi_config_t *)0)->sta.password)) {
+    return ESP_ERR_INVALID_ARG;
+  }
+
+  esp_err_t err = esp_netif_init();
+  if (err != ESP_OK && err != ESP_ERR_INVALID_STATE) return err;
+
+  err = esp_event_loop_create_default();
+  if (err != ESP_OK && err != ESP_ERR_INVALID_STATE) return err;
+
+  if (esp_netif_create_default_wifi_sta() == NULL) return ESP_FAIL;
+
+  wifi_init_config_t init_config = WIFI_INIT_CONFIG_DEFAULT();
+  err = esp_wifi_init(&init_config);
+  if (err != ESP_OK) return err;
+
+  err = esp_event_handler_register(WIFI_EVENT, ESP_EVENT_ANY_ID, wifi_event_handler, NULL);
+  if (err != ESP_OK) return err;
+  err = esp_event_handler_register(IP_EVENT, IP_EVENT_STA_GOT_IP, wifi_event_handler, NULL);
+  if (err != ESP_OK) return err;
+
+  wifi_config_t wifi_config = {0};
+  memcpy(wifi_config.sta.ssid, MAILBOX_WIFI_SSID, strlen(MAILBOX_WIFI_SSID));
+  memcpy(wifi_config.sta.password, MAILBOX_WIFI_PASSWORD, strlen(MAILBOX_WIFI_PASSWORD));
+  wifi_config.sta.threshold.authmode = WIFI_AUTH_WPA2_PSK;
+  wifi_config.sta.pmf_cfg.capable = true;
+  wifi_config.sta.pmf_cfg.required = false;
+
+  err = esp_wifi_set_mode(WIFI_MODE_STA);
+  if (err != ESP_OK) return err;
+  err = esp_wifi_set_config(WIFI_IF_STA, &wifi_config);
+  if (err != ESP_OK) return err;
+
+  esp_sntp_config_t sntp_config = ESP_NETIF_SNTP_DEFAULT_CONFIG("pool.ntp.org");
+  err = esp_netif_sntp_init(&sntp_config);
+  if (err != ESP_OK && err != ESP_ERR_INVALID_STATE) return err;
+
+  err = esp_wifi_start();
+  if (err != ESP_OK) return err;
+
+  wifi_started = true;
+  return ESP_OK;
+}
+
+esp_err_t board_get_device_token(char *token, size_t token_size) {
+  if (token == NULL || token_size == 0 || MAILBOX_DEVICE_TOKEN[0] == '\0') return ESP_ERR_INVALID_ARG;
+  size_t token_length = strlen(MAILBOX_DEVICE_TOKEN);
+  if (token_length >= token_size) return ESP_ERR_INVALID_SIZE;
+  memcpy(token, MAILBOX_DEVICE_TOKEN, token_length + 1);
+  return ESP_OK;
+}
 
 static esp_err_t board_spi_bus_init(void) {
   ESP_LOGI(TAG, "SPI pins: SCLK=%d MOSI=%d MISO=NC, max transfer=%d bytes.",
