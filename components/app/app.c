@@ -11,9 +11,10 @@
 #include "hal/gpio_types.h"
 #include "portmacro.h"
 #include "soc/gpio_num.h"
+#include "ui.h"
 
-#define DIM_DELAY (1000 * 5)
-#define SLEEP_DELAY (1000 * 10)
+#define DIM_DELAY (1000 * 10)
+#define SLEEP_DELAY (1000 * 15)
 
 static const char *TAG = "app_timer";
 
@@ -117,6 +118,8 @@ void app_task(void *arg) {
           // Turn off display, begin light sleep
           display_sleep();
         }
+
+        ui_draw_empty_screen();
 
         gpio_wakeup_enable(GPIO_NUM_33, GPIO_INTR_LOW_LEVEL);
         ESP_ERROR_CHECK(esp_sleep_enable_gpio_wakeup());

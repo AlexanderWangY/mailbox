@@ -21,4 +21,5 @@ idf_component_register(
     esp_lcd_touch_ft6336u
     lvgl
     esp_lvgl_port
+    app
 )

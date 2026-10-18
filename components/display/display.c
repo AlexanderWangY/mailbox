@@ -1,5 +1,4 @@
 #include "board.h"
-#include "freertos/FreeRTOS.h"
 #include "display.h"
 #include "driver/gpio.h"
 #include "driver/ledc.h"
@@ -12,11 +11,8 @@
 #include "esp_lcd_st7796.h"
 #include "esp_lcd_types.h"
 #include "esp_lvgl_port.h"
-#include "freertos/idf_additions.h"
-#include "freertos/projdefs.h"
 #include "hal/ledc_types.h"
 #include "include/lvgl/display/lv_display.h"
-#include "portmacro.h"
 #include "soc/clk_tree_defs.h"
 #include <stdint.h>
 
@@ -26,8 +22,6 @@
 static esp_lcd_panel_handle_t panel_handle = NULL;
 static esp_lcd_panel_io_handle_t io_handle = NULL;
 static const char *TAG = "display";
-
-static QueueHandle_t display_queue;
 
 static display_state_t state = DISPLAY_NORMAL;
 
@@ -112,9 +106,6 @@ void display_init(void) {
 
   ESP_ERROR_CHECK(ledc_channel_config(&channel));
   ESP_LOGI(TAG, "LED PWM configured.");
-
-  display_queue = xQueueCreate(16, sizeof(display_cmd_t));
-  ESP_LOGI(TAG, "Display queue initialized.");
 }
 
 void display_sleep(void) {
@@ -185,25 +176,3 @@ void display_clear() {
   lvgl_port_unlock();
 };
 
-BaseType_t display_submit_cmd(const display_cmd_t *cmd) {
-  return xQueueSend(display_queue, cmd, pdMS_TO_TICKS(100));
-}
-
-void display_task(void *arg) {
-  (void)arg;
-
-  display_cmd_t cmd;
-
-  for (;;) {
-    while (xQueueReceive(display_queue, &cmd, portMAX_DELAY)) {
-
-      // Process tasks
-      switch (cmd.type) {
-        case DISPLAY_CMD_SET_MESSAGE:
-        case DISPLAY_CMD_SET_SCREEN:
-        default:
-      }      
-    }
-  }
-  
-}
