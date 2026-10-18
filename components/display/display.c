@@ -118,8 +118,14 @@ void display_init(void) {
 }
 
 void display_sleep(void) {
-  ESP_ERROR_CHECK(gpio_set_level(LCD_BACKLIGHT_GPIO, 0));
+  ESP_LOGI(TAG, "Entering sleep; state=%d", (int)state);
+  ESP_ERROR_CHECK(ledc_set_duty(LEDC_LOW_SPEED_MODE, LEDC_CHANNEL_0, 0));
+  ESP_ERROR_CHECK(ledc_update_duty(LEDC_LOW_SPEED_MODE, LEDC_CHANNEL_0));
+  ESP_LOGI(TAG, "Backlight duty set to 0");
   lvgl_port_stop();
+  ESP_LOGI(TAG, "LVGL timer stopped");
+  ESP_ERROR_CHECK(esp_lcd_panel_disp_on_off(panel_handle, false));
+  ESP_LOGI(TAG, "Panel display disabled");
   ESP_ERROR_CHECK(esp_lcd_panel_disp_sleep(panel_handle, true));
   state = DISPLAY_SLEEP;
   ESP_LOGI(TAG, "Display is now asleep");
@@ -127,6 +133,7 @@ void display_sleep(void) {
 
 void display_wake(void) {
   ESP_ERROR_CHECK(esp_lcd_panel_disp_sleep(panel_handle, false));
+  ESP_ERROR_CHECK(esp_lcd_panel_disp_on_off(panel_handle, true));
   lvgl_port_resume();
 
   if (lvgl_port_lock(0)) {
@@ -134,12 +141,16 @@ void display_wake(void) {
     lvgl_port_unlock();
   }
 
-  ESP_ERROR_CHECK(gpio_set_level(LCD_BACKLIGHT_GPIO, 1));  
+  ESP_ERROR_CHECK(ledc_set_duty(LEDC_LOW_SPEED_MODE, LEDC_CHANNEL_0, 1023));
+  ESP_ERROR_CHECK(ledc_update_duty(LEDC_LOW_SPEED_MODE, LEDC_CHANNEL_0));
+  state = DISPLAY_NORMAL;
   ESP_LOGI(TAG, "Display is now awake");
 }
 
 void display_dim(void) {
-  uint32_t duty = 1023 * 0.5;
+  // Use a clearly visible low brightness so the dim stage is easy to distinguish.
+  uint32_t duty = 1023 * 0.2;
+  ESP_LOGI(TAG, "Dimming backlight: duty=%lu", (unsigned long)duty);
   ESP_ERROR_CHECK(
     ledc_set_duty(LEDC_LOW_SPEED_MODE, LEDC_CHANNEL_0, duty)
   );

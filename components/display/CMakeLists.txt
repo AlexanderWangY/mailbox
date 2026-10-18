@@ -1,6 +1,7 @@
 idf_component_register(
   SRCS
     "display.c"
+    "touch.c"
     "ui.c"
   EMBED_FILES
     "assets/FatSnickers.rgb565"
@@ -17,6 +18,7 @@ idf_component_register(
     board
     esp_lcd
     esp_lcd_st7796
+    esp_lcd_touch_ft6336u
     lvgl
     esp_lvgl_port
 )

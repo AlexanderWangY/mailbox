@@ -62,8 +62,16 @@ static void led_init(void) {
 static void lcd_power_init(void) {
   ESP_ERROR_CHECK(gpio_reset_pin(LCD_BOOST_EN_GPIO));
   ESP_ERROR_CHECK(gpio_set_direction(LCD_BOOST_EN_GPIO, GPIO_MODE_OUTPUT));
-  ESP_ERROR_CHECK(gpio_set_level(LCD_BOOST_EN_GPIO, 1));
-  vTaskDelay(pdMS_TO_TICKS(10));
+  ESP_ERROR_CHECK(lcd_boost_set_enabled(true));
+}
+
+esp_err_t lcd_boost_set_enabled(bool enabled) {
+  esp_err_t err = gpio_set_level(LCD_BOOST_EN_GPIO, enabled ? 1 : 0);
+  if (err == ESP_OK && enabled) {
+    // Preserve the startup settling time before the LCD is initialized or woken.
+    vTaskDelay(pdMS_TO_TICKS(10));
+  }
+  return err;
 }
 
 void init_board(void) {
@@ -98,6 +106,10 @@ void init_board(void) {
 
 void i2c_attach_device(i2c_device_config_t cfg, i2c_master_dev_handle_t *handle) {
   ESP_ERROR_CHECK(i2c_master_bus_add_device(i2c_bus, &cfg, handle));
+}
+
+i2c_master_bus_handle_t board_i2c_bus_handle(void) {
+  return i2c_bus;
 }
 
 esp_err_t i2c_write_reg(i2c_master_dev_handle_t dev, uint8_t reg, uint8_t val) {
