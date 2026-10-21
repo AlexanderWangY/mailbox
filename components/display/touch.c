@@ -108,6 +108,7 @@ void touch_task(void *arg) {
     if (is_pressed && !was_pressed) {
       app_event_t event = {
         .type = APP_EVENT_TOUCH_TAP,
+        .touch_tick = (uint32_t)xTaskGetTickCount(),
       };
       app_create_event(&event);
     }

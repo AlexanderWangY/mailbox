@@ -2,10 +2,12 @@
 
 #include <stdio.h>
 #include <string.h>
+#include <time.h>
 
 #include "board.h"
 #include "esp_crt_bundle.h"
 #include "esp_http_client.h"
+#include "esp_heap_caps.h"
 #include "esp_log.h"
 #include "esp_netif_sntp.h"
 #include "freertos/FreeRTOS.h"
@@ -16,7 +18,7 @@
 #define REST_TASK_STACK_SIZE 8192
 #define REST_TASK_PRIORITY 4
 #define REST_HTTP_TIMEOUT_MS 10000
-#define REST_TIME_SYNC_TIMEOUT_MS 10000
+#define REST_TIME_SYNC_TIMEOUT_MS 20000
 #define DEVICE_TOKEN_BUFFER_SIZE 128
 #define AUTH_HEADER_BUFFER_SIZE (DEVICE_TOKEN_BUFFER_SIZE + 8)
 #define RESPONSE_BUFFER_SIZE 768
@@ -55,7 +57,12 @@ static esp_err_t add_auth_header(esp_http_client_handle_t client, char *header, 
 }
 
 static esp_err_t wait_for_clock_sync(void) {
+  // The SNTP wait semaphore is consumed by a waiter, while the synchronized
+  // system clock remains valid for subsequent requests.
+  if (time(NULL) >= 1704067200) return ESP_OK;
+
   esp_err_t err = esp_netif_sntp_sync_wait(pdMS_TO_TICKS(REST_TIME_SYNC_TIMEOUT_MS));
+  if (err == ESP_OK && time(NULL) < 1704067200) err = ESP_ERR_INVALID_STATE;
   if (err != ESP_OK) {
     ESP_LOGW(TAG, "Network time is not synchronized: %s", esp_err_to_name(err));
   }
@@ -97,6 +104,8 @@ static esp_err_t perform_request(const char *url, esp_http_client_method_t metho
   if (client == NULL) return ESP_ERR_NO_MEM;
 
   char auth_header[AUTH_HEADER_BUFFER_SIZE];
+  size_t free_before = heap_caps_get_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+  size_t largest_before = heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
   err = add_auth_header(client, auth_header, sizeof(auth_header));
   memset(auth_header, 0, sizeof(auth_header));
   if (err == ESP_OK) err = esp_http_client_perform(client);
@@ -104,7 +113,8 @@ static esp_err_t perform_request(const char *url, esp_http_client_method_t metho
   esp_http_client_cleanup(client);
 
   if (err != ESP_OK) {
-    ESP_LOGW(TAG, "HTTP request failed: %s", esp_err_to_name(err));
+    ESP_LOGW(TAG, "HTTP request failed: %s; internal heap before TLS: free=%u largest=%u",
+             esp_err_to_name(err), (unsigned)free_before, (unsigned)largest_before);
     return err;
   }
   if (response->overflow) return ESP_ERR_INVALID_SIZE;

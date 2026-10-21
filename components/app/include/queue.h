@@ -5,7 +5,7 @@
 #include <stdint.h>
 #include <stdbool.h>
 
-#define QUEUE_SIZE 64
+#define QUEUE_SIZE 4
 #define BUFFER_SIZE (QUEUE_SIZE + 1)
 
 typedef enum {

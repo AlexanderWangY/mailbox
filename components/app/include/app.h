@@ -2,6 +2,7 @@
 
 #include "mail.h"
 #include "portmacro.h"
+#include <stdint.h>
 
 typedef enum {
     // User interaction
@@ -13,6 +14,8 @@ typedef enum {
     APP_EVENT_MAIL_POLL_COMPLETE,
     APP_EVENT_MAIL_POLL_FAILED,
     APP_EVENT_MAIL_POLL_TIMEOUT,
+    APP_EVENT_MAIL_READ_COMPLETE,
+    APP_EVENT_MAIL_READ_FAILED,
 
     // Power management
     APP_EVENT_IDLE_DIM,
@@ -25,6 +28,7 @@ typedef struct {
 
   union {
     mail_t mail_content;
+    uint32_t touch_tick;
   };
 } app_event_t;
 

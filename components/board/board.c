@@ -17,6 +17,7 @@
 #include <string.h>
 #include <stdint.h>
 #include <stdio.h>
+#include <stdatomic.h>
 #include "board.h"
 #include "device_secrets.h"
 
@@ -40,6 +41,8 @@
 static i2c_master_bus_handle_t i2c_bus;
 static const char *TAG = "mailbox";
 static bool wifi_started;
+static atomic_bool wifi_connected;
+static atomic_bool wifi_sleeping;
 
 static void wifi_event_handler(void *arg, esp_event_base_t event_base,
                                int32_t event_id, void *event_data) {
@@ -50,12 +53,17 @@ static void wifi_event_handler(void *arg, esp_event_base_t event_base,
     esp_err_t err = esp_wifi_connect();
     if (err != ESP_OK) ESP_LOGE(TAG, "Wi-Fi connect request failed: %s", esp_err_to_name(err));
   } else if (event_base == WIFI_EVENT && event_id == WIFI_EVENT_STA_DISCONNECTED) {
+    atomic_store(&wifi_connected, false);
+    if (atomic_load(&wifi_sleeping)) return;
     ESP_LOGW(TAG, "Wi-Fi disconnected; retrying.");
     esp_err_t err = esp_wifi_connect();
     if (err != ESP_OK) ESP_LOGE(TAG, "Wi-Fi reconnect request failed: %s", esp_err_to_name(err));
   } else if (event_base == IP_EVENT && event_id == IP_EVENT_STA_GOT_IP) {
     ip_event_got_ip_t *event = (ip_event_got_ip_t *)event_data;
     ESP_LOGI(TAG, "Wi-Fi connected; address=" IPSTR, IP2STR(&event->ip_info.ip));
+    atomic_store(&wifi_connected, true);
+    esp_err_t err = esp_netif_sntp_start();
+    if (err != ESP_OK) ESP_LOGW(TAG, "Could not start network time sync: %s", esp_err_to_name(err));
   }
 }
 
@@ -97,6 +105,7 @@ esp_err_t board_wifi_init(void) {
   if (err != ESP_OK) return err;
 
   esp_sntp_config_t sntp_config = ESP_NETIF_SNTP_DEFAULT_CONFIG("pool.ntp.org");
+  sntp_config.start = false;
   err = esp_netif_sntp_init(&sntp_config);
   if (err != ESP_OK && err != ESP_ERR_INVALID_STATE) return err;
 
@@ -105,6 +114,30 @@ esp_err_t board_wifi_init(void) {
 
   wifi_started = true;
   return ESP_OK;
+}
+
+bool board_wifi_started(void) {
+  return wifi_started;
+}
+
+bool board_wifi_connected(void) {
+  return atomic_load(&wifi_connected);
+}
+
+esp_err_t board_wifi_stop_for_sleep(void) {
+  if (!wifi_started) return ESP_OK;
+  atomic_store(&wifi_sleeping, true);
+  atomic_store(&wifi_connected, false);
+  esp_err_t err = esp_wifi_stop();
+  if (err != ESP_OK) atomic_store(&wifi_sleeping, false);
+  return err;
+}
+
+esp_err_t board_wifi_resume_after_sleep(void) {
+  if (!wifi_started) return ESP_OK;
+  esp_err_t err = esp_wifi_start();
+  if (err == ESP_OK) atomic_store(&wifi_sleeping, false);
+  return err;
 }
 
 esp_err_t board_get_device_token(char *token, size_t token_size) {
