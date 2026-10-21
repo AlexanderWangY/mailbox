@@ -26,10 +26,10 @@ static const char *TAG = "display";
 static display_state_t state = DISPLAY_NORMAL;
 
 void display_init(void) {
-  // reset and pull backlight to high
+  // Keep the panel dark until the initial screen has been selected.
   ESP_ERROR_CHECK(gpio_reset_pin(LCD_BACKLIGHT_GPIO));
   ESP_ERROR_CHECK(gpio_set_direction(LCD_BACKLIGHT_GPIO, GPIO_MODE_OUTPUT));
-  ESP_ERROR_CHECK(gpio_set_level(LCD_BACKLIGHT_GPIO, 1));
+  ESP_ERROR_CHECK(gpio_set_level(LCD_BACKLIGHT_GPIO, 0));
 
 
   esp_lcd_panel_io_spi_config_t io_cfg = {
@@ -100,7 +100,7 @@ void display_init(void) {
     .speed_mode = LEDC_LOW_SPEED_MODE,
     .channel = LEDC_CHANNEL_0,
     .timer_sel = LEDC_TIMER_0,
-    .duty = 1023,
+    .duty = 0,
     .hpoint = 0,
   };
 
