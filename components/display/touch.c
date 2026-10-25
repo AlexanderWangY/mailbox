@@ -1,131 +1,144 @@
-#include "freertos/FreeRTOS.h"
-#include "app.h"
-#include "esp_attr.h"
-#include "esp_lcd_touch.h"
+#include "touch.h"
+
 #include "board.h"
 #include "display.h"
 #include "driver/gpio.h"
-#include "esp_err.h"
 #include "esp_lcd_io_i2c.h"
 #include "esp_lcd_panel_io.h"
 #include "esp_lcd_touch_ft6x36.h"
-#include "freertos/idf_additions.h"
-#include "freertos/projdefs.h"
-#include "portmacro.h"
-#include "touch.h"
-#include <stdbool.h>
-#include <stdint.h>
+#include "esp_log.h"
+#include "esp_sleep.h"
+#include "freertos/FreeRTOS.h"
+#include "freertos/semphr.h"
+#include "freertos/task.h"
 
-static esp_lcd_panel_io_handle_t touch_io_handle;
-static esp_lcd_touch_handle_t touch_handle;
-static TaskHandle_t touch_task_handle;
-static volatile uint32_t touch_irq_count;
-static volatile uint32_t touch_press_count;
+#define TOUCH_IRQ GPIO_NUM_33
+#define TOUCH_RESET GPIO_NUM_13
 
-static void IRAM_ATTR touch_isr(esp_lcd_touch_handle_t tp) {
-  (void)tp;
-  BaseType_t higher_priority_task_awoken = pdFALSE;
+typedef enum {
+  TOUCH_ACTIVE,
+  TOUCH_SLEEPING,
+} touch_mode_t;
 
-  touch_irq_count++;
-  vTaskNotifyGiveFromISR(touch_task_handle, &higher_priority_task_awoken);
+static const char *TAG = "touch";
+static esp_lcd_touch_handle_t controller;
+static TaskHandle_t task;
+static SemaphoreHandle_t lock;
+static touch_mode_t mode;
+static bool consume_until_release;
+static uint32_t sequence; // Protected by lock, like mode and consume_until_release.
+static touch_callback_t on_tap;
+static void *callback_context;
 
-  if (higher_priority_task_awoken) {
-    portYIELD_FROM_ISR();
-  }
-}
-
-uint32_t touch_interrupt_count(void) {
-  return touch_irq_count;
-}
-
-uint32_t touch_tap_count(void) {
-  return touch_press_count;
-}
-
-void touch_init(void) {
-  const gpio_config_t reset_gpio_config = {
-    .mode = GPIO_MODE_OUTPUT,
-    .pin_bit_mask = (1ULL << GPIO_NUM_13),
-  };
-  ESP_ERROR_CHECK(gpio_config(&reset_gpio_config));
-  ESP_ERROR_CHECK(gpio_set_level(GPIO_NUM_13, 0));
-  vTaskDelay(pdMS_TO_TICKS(10));
-  ESP_ERROR_CHECK(gpio_set_level(GPIO_NUM_13, 1));
-  // FT6336U can take up to 300 ms to become ready after reset.
-  vTaskDelay(pdMS_TO_TICKS(300));
-
-  esp_lcd_panel_io_i2c_config_t io_config =
-    ESP_LCD_TOUCH_IO_I2C_FT6x36_CONFIG();
-  io_config.dev_addr = 0x38;
-  io_config.scl_speed_hz = 100'000;
-
-  ESP_ERROR_CHECK(esp_lcd_new_panel_io_i2c(
-    board_i2c_bus_handle(), &io_config, &touch_io_handle
-  ));
-
-  esp_lcd_touch_config_t touch_config = {
-    .x_max = LCD_WIDTH,
-    .y_max = LCD_HEIGHT,
-    // Reset was pulsed above with the datasheet-required startup delay.
-    .rst_gpio_num = GPIO_NUM_NC,
-    .int_gpio_num = GPIO_NUM_33,
-    .levels = {
-      .reset = 0,
-      .interrupt = 0,
-    },
-    .flags = {
-      .swap_xy = true,
-    },
-  };
-
-  ESP_ERROR_CHECK(esp_lcd_touch_new_i2c_ft6x36(
-    touch_io_handle, &touch_config, &touch_handle
-  ));
-  ESP_ERROR_CHECK(gpio_pullup_en(GPIO_NUM_33));
-
-  BaseType_t task_created = xTaskCreate(
-    touch_task, "touch task", 4096, NULL, 3, &touch_task_handle
-  );
-  ESP_ERROR_CHECK(task_created == pdPASS ? ESP_OK : ESP_ERR_NO_MEM);
-  ESP_ERROR_CHECK(
-    esp_lcd_touch_register_interrupt_callback(touch_handle, touch_isr)
-  );
-}
-
-void touch_read(void) {}
-
-void touch_task(void *arg) {
+static void touch_isr(void *arg) {
   (void)arg;
-  bool was_pressed = false;
+  // Mask the pin until the task services it, so a noisy IRQ cannot monopolize
+  // the CPU. GPIO wake detection remains independent of the task notification.
+  gpio_intr_disable(TOUCH_IRQ);
+  BaseType_t yield = pdFALSE;
+  vTaskNotifyGiveFromISR(task, &yield);
+  if (yield) portYIELD_FROM_ISR();
+}
 
+static void touch_task(void *arg) {
+  (void)arg;
+  bool pressed = false;
   for (;;) {
-    if (!was_pressed) {
-      ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
-    } else {
-      // Keep checking briefly while a finger is down so release is detected
-      // even if the controller doesn't generate a separate release edge.
-      ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(20));
-    }
-
-    if (esp_lcd_touch_read_data(touch_handle) != ESP_OK) {
+    ulTaskNotifyTake(pdTRUE, pressed ? pdMS_TO_TICKS(20) : portMAX_DELAY);
+    xSemaphoreTake(lock, portMAX_DELAY);
+    if (mode == TOUCH_SLEEPING) {
+      pressed = false;
+      xSemaphoreGive(lock);
       continue;
     }
 
-    uint16_t x[2], y[2], strength[2];
-    uint8_t point_count = 0;
-    bool is_pressed = esp_lcd_touch_get_coordinates(
-      touch_handle, x, y, strength, &point_count, 2
-    ) && point_count > 0;
-
-    if (is_pressed && !was_pressed) {
-      touch_press_count++;
-      app_event_t event = {
-        .type = APP_EVENT_TOUCH_TAP,
-        .touch_tick = (uint32_t)xTaskGetTickCount(),
-      };
-      app_create_event(&event);
+    esp_lcd_touch_point_data_t point_data[2];
+    uint8_t points = 0;
+    esp_err_t err = esp_lcd_touch_read_data(controller);
+    if (err == ESP_OK) err = esp_lcd_touch_get_data(controller, point_data, &points, 2);
+    bool down = err == ESP_OK && points != 0;
+    if (err != ESP_OK) ESP_LOGW(TAG, "Touch read failed: %s", esp_err_to_name(err));
+    if (down && !pressed && !consume_until_release) {
+      on_tap(++sequence, callback_context);
     }
+    if (!down && err == ESP_OK) consume_until_release = false;
+    pressed = down;
+    xSemaphoreGive(lock);
 
-    was_pressed = is_pressed;
+    if (!pressed) {
+      // Bound spurious notifications; there is no periodic read while idle.
+      vTaskDelay(pdMS_TO_TICKS(20));
+      xSemaphoreTake(lock, portMAX_DELAY);
+      if (mode == TOUCH_ACTIVE) ESP_ERROR_CHECK(gpio_intr_enable(TOUCH_IRQ));
+      xSemaphoreGive(lock);
+    }
   }
+}
+
+void touch_init(touch_callback_t callback, void *context) {
+  on_tap = callback;
+  callback_context = context;
+  lock = xSemaphoreCreateMutex();
+  ESP_ERROR_CHECK(lock != NULL ? ESP_OK : ESP_ERR_NO_MEM);
+
+  const gpio_config_t reset = {
+    .mode = GPIO_MODE_OUTPUT,
+    .pin_bit_mask = 1ULL << TOUCH_RESET,
+  };
+  ESP_ERROR_CHECK(gpio_config(&reset));
+  ESP_ERROR_CHECK(gpio_set_level(TOUCH_RESET, 0));
+  vTaskDelay(pdMS_TO_TICKS(10));
+  ESP_ERROR_CHECK(gpio_set_level(TOUCH_RESET, 1));
+  vTaskDelay(pdMS_TO_TICKS(300));
+
+  esp_lcd_panel_io_handle_t io;
+  esp_lcd_panel_io_i2c_config_t io_config = ESP_LCD_TOUCH_IO_I2C_FT6x36_CONFIG();
+  io_config.dev_addr = 0x38;
+  io_config.scl_speed_hz = 100000;
+  ESP_ERROR_CHECK(esp_lcd_new_panel_io_i2c(board_i2c_bus_handle(), &io_config, &io));
+  esp_lcd_touch_config_t config = {
+    .x_max = LCD_WIDTH,
+    .y_max = LCD_HEIGHT,
+    .rst_gpio_num = GPIO_NUM_NC,
+    .int_gpio_num = TOUCH_IRQ,
+    .levels.interrupt = 0,
+    .flags.swap_xy = true,
+  };
+  ESP_ERROR_CHECK(esp_lcd_touch_new_i2c_ft6x36(io, &config, &controller));
+  ESP_ERROR_CHECK(gpio_intr_disable(TOUCH_IRQ));
+  ESP_ERROR_CHECK(gpio_set_pull_mode(TOUCH_IRQ, GPIO_PULLUP_ONLY));
+  ESP_ERROR_CHECK(gpio_set_intr_type(TOUCH_IRQ, GPIO_INTR_NEGEDGE));
+  ESP_ERROR_CHECK(xTaskCreate(touch_task, "touch", 4096, NULL, 3, &task) == pdPASS
+                  ? ESP_OK : ESP_ERR_NO_MEM);
+  esp_err_t err = gpio_install_isr_service(0);
+  ESP_ERROR_CHECK(err == ESP_ERR_INVALID_STATE ? ESP_OK : err);
+  ESP_ERROR_CHECK(gpio_isr_handler_add(TOUCH_IRQ, touch_isr, NULL));
+  ESP_ERROR_CHECK(gpio_intr_enable(TOUCH_IRQ));
+  xTaskNotifyGive(task);
+}
+
+bool touch_prepare_sleep(uint32_t consumed_sequence) {
+  xSemaphoreTake(lock, portMAX_DELAY);
+  bool ready = sequence == consumed_sequence;
+  if (ready) {
+    mode = TOUCH_SLEEPING;
+    ESP_ERROR_CHECK(gpio_intr_disable(TOUCH_IRQ));
+    ESP_ERROR_CHECK(gpio_wakeup_enable(TOUCH_IRQ, GPIO_INTR_LOW_LEVEL));
+    ESP_ERROR_CHECK(esp_sleep_enable_gpio_wakeup());
+  }
+  xSemaphoreGive(lock);
+  return ready;
+}
+
+uint32_t touch_finish_sleep(bool consume_wake_press) {
+  xSemaphoreTake(lock, portMAX_DELAY);
+  ESP_ERROR_CHECK(gpio_wakeup_disable(TOUCH_IRQ));
+  ESP_ERROR_CHECK(gpio_set_intr_type(TOUCH_IRQ, GPIO_INTR_NEGEDGE));
+  consume_until_release = consume_wake_press;
+  mode = TOUCH_ACTIVE;
+  ESP_ERROR_CHECK(gpio_intr_enable(TOUCH_IRQ));
+  xTaskNotifyGive(task);
+  uint32_t consumed = sequence;
+  xSemaphoreGive(lock);
+  return consumed;
 }

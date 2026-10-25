@@ -22,7 +22,6 @@ static const char *TAG = "ui";
 static lv_obj_t *empty_screen;
 static lv_obj_t *mail_screen;
 static lv_obj_t *reading_screen;
-static lv_obj_t *debug_screen;
 static lv_obj_t *reading_message_label;
 static lv_obj_t *battery_status_label;
 
@@ -208,7 +207,6 @@ void ui_init(void) {
   empty_screen = lv_obj_create(NULL);
   mail_screen = lv_obj_create(NULL);
   reading_screen = lv_obj_create(NULL);
-  debug_screen = lv_obj_create(NULL);
   setup_mail_screen();
   setup_empty_screen();
   setup_reading_screen();

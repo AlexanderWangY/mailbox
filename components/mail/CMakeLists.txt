@@ -4,6 +4,8 @@ idf_component_register(
   REQUIRES
     board
     esp_http_client
+    esp_timer
+    lwip
     heap
     mbedtls
 )
