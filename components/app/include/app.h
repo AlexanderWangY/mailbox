@@ -20,6 +20,7 @@ typedef enum {
     // Power management
     APP_EVENT_IDLE_DIM,
     APP_EVENT_IDLE_SLEEP,
+    APP_EVENT_BATTERY_UPDATE,
 
 } app_event_type_t;
 

@@ -28,6 +28,8 @@ bool board_wifi_connected(void);
 esp_err_t board_wifi_stop_for_sleep(void);
 esp_err_t board_wifi_resume_after_sleep(void);
 esp_err_t board_get_device_token(char *token, size_t token_size);
+esp_err_t board_battery_init(void);
+esp_err_t board_battery_read_percent(int *percent);
 esp_err_t lcd_boost_set_enabled(bool enabled);
 i2c_master_bus_handle_t board_i2c_bus_handle(void);
 

@@ -19,16 +19,27 @@
 static esp_lcd_panel_io_handle_t touch_io_handle;
 static esp_lcd_touch_handle_t touch_handle;
 static TaskHandle_t touch_task_handle;
+static volatile uint32_t touch_irq_count;
+static volatile uint32_t touch_press_count;
 
 static void IRAM_ATTR touch_isr(esp_lcd_touch_handle_t tp) {
   (void)tp;
   BaseType_t higher_priority_task_awoken = pdFALSE;
 
+  touch_irq_count++;
   vTaskNotifyGiveFromISR(touch_task_handle, &higher_priority_task_awoken);
 
   if (higher_priority_task_awoken) {
     portYIELD_FROM_ISR();
   }
+}
+
+uint32_t touch_interrupt_count(void) {
+  return touch_irq_count;
+}
+
+uint32_t touch_tap_count(void) {
+  return touch_press_count;
 }
 
 void touch_init(void) {
@@ -70,6 +81,7 @@ void touch_init(void) {
   ESP_ERROR_CHECK(esp_lcd_touch_new_i2c_ft6x36(
     touch_io_handle, &touch_config, &touch_handle
   ));
+  ESP_ERROR_CHECK(gpio_pullup_en(GPIO_NUM_33));
 
   BaseType_t task_created = xTaskCreate(
     touch_task, "touch task", 4096, NULL, 3, &touch_task_handle
@@ -106,6 +118,7 @@ void touch_task(void *arg) {
     ) && point_count > 0;
 
     if (is_pressed && !was_pressed) {
+      touch_press_count++;
       app_event_t event = {
         .type = APP_EVENT_TOUCH_TAP,
         .touch_tick = (uint32_t)xTaskGetTickCount(),

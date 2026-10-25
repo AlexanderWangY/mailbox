@@ -14,6 +14,10 @@ void app_main(void)
 {
   ESP_LOGI(TAG, "Startup: initializing board");
   init_board();
+  esp_err_t battery_err = board_battery_init();
+  if (battery_err != ESP_OK) {
+    ESP_LOGW(TAG, "Battery monitor unavailable: %s", esp_err_to_name(battery_err));
+  }
   esp_err_t wifi_err = board_wifi_init();
   if (wifi_err != ESP_OK) {
     ESP_LOGW(TAG, "Wi-Fi startup failed; will continue without mail access: %s", esp_err_to_name(wifi_err));

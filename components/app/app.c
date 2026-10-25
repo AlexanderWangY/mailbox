@@ -5,6 +5,7 @@
 #include "freertos/FreeRTOS.h"
 #include "board.h"
 #include "display.h"
+#include "touch.h"
 #include "ui.h"
 #include <stdbool.h>
 #include <stdint.h>
@@ -21,16 +22,17 @@
 #include "soc/gpio_num.h"
 #include "rest.h"
 
-#define DIM_DELAY (1000 * 10)
-#define SLEEP_DELAY (1000 * 15)
-#define AWAKE_MAIL_POLL_INTERVAL (1000 * 60)
+#define DIM_DELAY (1000 * 30)
+#define SLEEP_DELAY (1000 * 45)
+#define MAIL_POLL_INTERVAL_SECONDS (10 * 60)
+#define AWAKE_MAIL_POLL_INTERVAL (MAIL_POLL_INTERVAL_SECONDS * 1000)
+#define BATTERY_UPDATE_INTERVAL (1000 * 60)
 #define MAIL_POLL_TIMEOUT (1000 * 30)
 #define NEW_MAIL_HAPTIC_EFFECT 47
 #define WAKE_TOUCH_WINDOW_MS 500
 
 #define US_IN_S 1000000
-// Poll mail every 10 seconds while sleeping (short interval for development).
-#define SLEEP_TIMER_DELAY (US_IN_S * 10)
+#define SLEEP_TIMER_DELAY (US_IN_S * MAIL_POLL_INTERVAL_SECONDS)
 
 static const char *TAG = "app_timer";
 
@@ -40,6 +42,7 @@ static app_mail_queue_t mail_queue;
 static TimerHandle_t dim_timer_handler;
 static TimerHandle_t sleep_timer_handler;
 static TimerHandle_t awake_mail_poll_timer_handler;
+static TimerHandle_t battery_update_timer_handler;
 static TimerHandle_t mail_poll_timer_handler; // Fires if mail poll taking too long
 static TickType_t last_interaction;
 static bool mail_poll_in_progress;
@@ -145,6 +148,21 @@ static void awake_mail_poll_callback( TimerHandle_t xTimer ) {
            (unsigned long)xTaskGetTickCount(), (int)queued);
 }
 
+static void battery_update_callback(TimerHandle_t timer) {
+  app_event_t event = {.type = APP_EVENT_BATTERY_UPDATE};
+  xQueueSend(app_queue, &event, 0);
+}
+
+static void update_battery_display(void) {
+  int percent;
+  esp_err_t err = board_battery_read_percent(&percent);
+  if (err == ESP_OK) {
+    ui_set_battery_status(percent, false);
+  } else if (err == ESP_ERR_NOT_FOUND) {
+    ui_set_battery_status(-1, false);
+  }
+}
+
 static void dim_timer_callback( TimerHandle_t xTimer )
 {
   app_event_t event = {
@@ -195,6 +213,7 @@ void app_init() {
 
   mail_poll_timer_handler = xTimerCreate("mail poll timeout", pdMS_TO_TICKS(MAIL_POLL_TIMEOUT), false, NULL, mail_poll_timeout_callback);
   awake_mail_poll_timer_handler = xTimerCreate("awake mail poll", pdMS_TO_TICKS(AWAKE_MAIL_POLL_INTERVAL), pdTRUE, NULL, awake_mail_poll_callback);
+  battery_update_timer_handler = xTimerCreate("battery update", pdMS_TO_TICKS(BATTERY_UPDATE_INTERVAL), pdTRUE, NULL, battery_update_callback);
   dim_timer_handler = xTimerCreate("dim timer", pdMS_TO_TICKS(DIM_DELAY), false, NULL, dim_timer_callback);
   sleep_timer_handler = xTimerCreate("sleep timer", pdMS_TO_TICKS(SLEEP_DELAY), false, NULL, sleep_timer_callback);
 
@@ -221,15 +240,22 @@ void app_task(void *arg) {
   BaseType_t dim_started = xTimerStart(dim_timer_handler, 0);
   BaseType_t sleep_started = xTimerStart(sleep_timer_handler, 0);
   BaseType_t awake_poll_started = xTimerStart(awake_mail_poll_timer_handler, 0);
+  BaseType_t battery_started = battery_update_timer_handler != NULL
+    ? xTimerStart(battery_update_timer_handler, 0) : pdFAIL;
   ESP_LOGI(TAG, "Starting timers at tick %lu: poll=%d dim=%d sleep=%d",
            (unsigned long)last_interaction, (int)awake_poll_started,
            (int)dim_started, (int)sleep_started);
+  if (battery_started != pdPASS) ESP_LOGW(TAG, "Could not start battery update timer");
+  update_battery_display();
   app_event_t initial_poll = {.type = APP_EVENT_MAIL_POLL_DUE};
   app_create_event(&initial_poll);
 
   for (;;) {
     while(xQueueReceive(app_queue, &event, portMAX_DELAY)) {
       switch (event.type) {
+      case APP_EVENT_BATTERY_UPDATE:
+        update_battery_display();
+        break;
       case APP_EVENT_TOUCH_TAP: {
         ESP_LOGI(TAG, "Touch event at tick %lu", (unsigned long)xTaskGetTickCount());
         if (suppress_wake_touch) {
@@ -267,7 +293,9 @@ void app_task(void *arg) {
           display_dim();
         }
         break;
-      case APP_EVENT_IDLE_SLEEP:
+      case APP_EVENT_IDLE_SLEEP: {
+        uint32_t taps_at_start = touch_tap_count();
+        uint32_t touch_irqs_at_start = touch_interrupt_count();
         ESP_LOGI(TAG, "Sleep event at tick %lu; elapsed=%lu; display_state=%d",
                  (unsigned long)xTaskGetTickCount(),
                  (unsigned long)(xTaskGetTickCount() - last_interaction),
@@ -294,16 +322,41 @@ void app_task(void *arg) {
         xTimerStop(mail_poll_timer_handler, pdMS_TO_TICKS(100));
         mail_poll_in_progress = false;
 
-        if (display_state() != DISPLAY_SLEEP) {
-          // Turn off display, begin light sleep
-          display_sleep();
+        // Keep the touch interrupt active while Wi-Fi stops. A tap in this
+        // interval must cancel sleep even if the finger is released before
+        // esp_light_sleep_start() is reached.
+        ESP_ERROR_CHECK(board_wifi_stop_for_sleep());
+        ESP_ERROR_CHECK(gpio_intr_disable(GPIO_NUM_33));
+        uint32_t taps_after_setup = touch_tap_count();
+        uint32_t touch_irqs_after_setup = touch_interrupt_count();
+        if (taps_after_setup != taps_at_start) {
+          ESP_ERROR_CHECK(gpio_intr_enable(GPIO_NUM_33));
+          ESP_ERROR_CHECK(board_wifi_resume_after_sleep());
+          touch_wake_tick = (uint32_t)xTaskGetTickCount();
+          suppress_wake_touch = true;
+          reset_inactivity_timers();
+          xTimerStart(awake_mail_poll_timer_handler, 0);
+          ESP_LOGI(TAG, "Canceled sleep; touch taps changed %lu->%lu",
+                   (unsigned long)taps_at_start, (unsigned long)taps_after_setup);
+          break;
         }
 
-        gpio_wakeup_enable(GPIO_NUM_33, GPIO_INTR_LOW_LEVEL);
+        if (touch_irqs_after_setup - touch_irqs_at_start > 100) {
+          ESP_LOGW(TAG, "Touch IRQ burst during sleep setup: %lu interrupts, GPIO33=%d",
+                   (unsigned long)(touch_irqs_after_setup - touch_irqs_at_start),
+                   gpio_get_level(GPIO_NUM_33));
+        }
+
+        // GPIO wake configuration replaces the touch driver's falling-edge
+        // interrupt with a low-level interrupt. Restore it after every wake.
+        ESP_ERROR_CHECK(gpio_wakeup_enable(GPIO_NUM_33, GPIO_INTR_LOW_LEVEL));
         ESP_ERROR_CHECK(esp_sleep_enable_gpio_wakeup());
         ESP_ERROR_CHECK(esp_sleep_enable_timer_wakeup(SLEEP_TIMER_DELAY));
-        ESP_ERROR_CHECK(board_wifi_stop_for_sleep());
+        if (display_state() != DISPLAY_SLEEP) display_sleep();
         esp_err_t sleep_err = esp_light_sleep_start();
+        ESP_ERROR_CHECK(gpio_wakeup_disable(GPIO_NUM_33));
+        ESP_ERROR_CHECK(gpio_set_intr_type(GPIO_NUM_33, GPIO_INTR_NEGEDGE));
+        ESP_ERROR_CHECK(gpio_intr_enable(GPIO_NUM_33));
         ESP_ERROR_CHECK(board_wifi_resume_after_sleep());
         ESP_ERROR_CHECK(sleep_err);
 
@@ -315,6 +368,7 @@ void app_task(void *arg) {
           touch_wake_tick = (uint32_t)xTaskGetTickCount();
           suppress_wake_touch = true;
           reset_inactivity_timers();
+          update_battery_display();
           xTimerStart(awake_mail_poll_timer_handler, 0);
           break;
         } else if (causes & (1U << ESP_SLEEP_WAKEUP_TIMER)) {
@@ -328,6 +382,7 @@ void app_task(void *arg) {
           break;
         }
         break;
+      }
       case APP_EVENT_NEW_MAIL: {
         // Immediately STOP mail timeout timer
         xTimerStop(mail_poll_timer_handler, 0);
