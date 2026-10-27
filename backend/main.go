@@ -319,80 +319,51 @@ var pageTemplate = template.Must(template.New("page").Parse(`<!doctype html>
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <meta name="theme-color" content="#f5f1e9">
   <title>Mailbox</title>
-  <style>
-    :root { color-scheme: light; font-family: ui-rounded, "Avenir Next", system-ui, sans-serif; background: #f5f1e9; color: #28251f; }
-    * { box-sizing: border-box; }
-    body { margin: 0; min-height: 100vh; display: grid; place-items: center; padding: 24px 16px; }
-    main { width: min(100%, 560px); }
-    .card { background: #fffdf9; border: 1px solid #e9e2d7; border-radius: 22px; padding: clamp(22px, 6vw, 38px); box-shadow: 0 16px 50px #51483312; }
-    .eyebrow { margin: 0 0 8px; color: #796c58; font-size: .78rem; font-weight: 700; letter-spacing: .12em; text-transform: uppercase; }
-    h1 { margin: 0 0 10px; font-size: clamp(1.8rem, 7vw, 2.35rem); letter-spacing: -.04em; }
-    .hint { margin: 0 0 26px; color: #706a60; line-height: 1.5; }
-    label { display: block; margin: 0 0 8px; font-size: .94rem; font-weight: 700; }
-    input, textarea { display: block; width: 100%; border: 1px solid #d9d1c4; border-radius: 12px; background: white; color: inherit; font: inherit; padding: 13px 14px; outline: none; }
-    input:focus, textarea:focus { border-color: #6f795b; box-shadow: 0 0 0 3px #6f795b25; }
-    textarea { min-height: 190px; resize: vertical; line-height: 1.5; }
-    .meta { display: flex; justify-content: space-between; gap: 12px; margin-top: 8px; color: #777064; font-size: .82rem; }
-    #byte-count.over { color: #b42318; font-weight: 700; }
-    button { width: 100%; margin-top: 22px; border: 0; border-radius: 12px; padding: 14px 18px; background: #596448; color: white; font: inherit; font-weight: 700; cursor: pointer; }
-    button:hover { background: #465239; }
-    button:disabled { opacity: .48; cursor: not-allowed; }
-    .notice { margin: 0 0 20px; border-radius: 10px; padding: 12px 14px; line-height: 1.4; }
-    .error { color: #8c2118; background: #fff0ed; }
-    .success { color: #31552c; background: #edf6e9; }
-    .topline { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-bottom: 25px; }
-    .topline .eyebrow { margin: 0; }
-    .logout { width: auto; margin: 0; padding: 9px 13px; color: #514b40; background: transparent; border: 1px solid #d9d1c4; }
-    .logout:hover { background: #f5f1e9; }
-    @media (max-width: 420px) { body { padding: 12px; } .card { border-radius: 17px; } .meta { font-size: .76rem; } }
-  </style>
 </head>
 <body>
 <main>
-  <section class="card">
-    {{if .Authenticated}}
-      <div class="topline"><p class="eyebrow">A little note for the mailbox</p><form method="post" action="/logout"><input type="hidden" name="csrf_token" value="{{.CSRFToken}}"><button class="logout" type="submit">Log out</button></form></div>
-      <h1>Send a message</h1>
-      <p class="hint">Write a short note and it will be delivered to the mailbox.</p>
-      {{if .Error}}<p class="notice error" role="alert">{{.Error}}</p>{{end}}
-      {{if .Success}}<p class="notice success" role="status">{{.Success}}</p>{{end}}
-      <form method="post" action="/send">
-        <input type="hidden" name="csrf_token" value="{{.CSRFToken}}">
-        <label for="content">Your message</label>
-        <textarea id="content" name="content" required>{{.Content}}</textarea>
-        <div class="meta"><span>Up to {{.MaxBytes}} UTF-8 bytes</span><span id="byte-count" aria-live="polite">0 / {{.MaxBytes}} bytes</span></div>
-        <button id="send-button" type="submit">Send to mailbox</button>
-      </form>
-      <script>
-        (() => {
-          const field = document.getElementById('content');
-          const count = document.getElementById('byte-count');
-          const button = document.getElementById('send-button');
-          const max = {{.MaxBytes}};
-          const update = () => {
-            const bytes = new TextEncoder().encode(field.value).length;
-            count.textContent = bytes + ' / ' + max + ' bytes';
-            count.classList.toggle('over', bytes > max);
-            button.disabled = bytes === 0 || bytes > max || field.value.trim().length === 0;
-          };
-          field.addEventListener('input', update);
-          update();
-        })();
-      </script>
-    {{else}}
-      <p class="eyebrow">Mailbox</p>
-      <h1>Sign in</h1>
-      <p class="hint">Enter your sender password to write a message.</p>
-      {{if .Error}}<p class="notice error" role="alert">{{.Error}}</p>{{end}}
-      <form method="post" action="/login">
+  <h1>Mailbox</h1>
+  {{if .Error}}<p role="alert">{{.Error}}</p>{{end}}
+  {{if .Success}}<p role="status">{{.Success}}</p>{{end}}
+  {{if .Authenticated}}
+    <h2>Send a message</h2>
+    <form method="post" action="/send">
+      <input type="hidden" name="csrf_token" value="{{.CSRFToken}}">
+      <p><label for="content">Message (up to {{.MaxBytes}} UTF-8 bytes)</label></p>
+      <p><textarea id="content" name="content" rows="6" cols="30" aria-describedby="byte-count" required>{{.Content}}</textarea></p>
+      <p id="byte-count" aria-live="polite">Limit: {{.MaxBytes}} bytes</p>
+      <p><button id="send-button" type="submit">Send</button></p>
+    </form>
+    <form method="post" action="/logout">
+      <input type="hidden" name="csrf_token" value="{{.CSRFToken}}">
+      <button type="submit">Log out</button>
+    </form>
+    <script>
+      (() => {
+        const field = document.getElementById('content');
+        const count = document.getElementById('byte-count');
+        const button = document.getElementById('send-button');
+        const max = {{.MaxBytes}};
+        const update = () => {
+          const bytes = new TextEncoder().encode(field.value).length;
+          count.textContent = bytes + ' / ' + max + ' bytes';
+          button.disabled = bytes === 0 || bytes > max || field.value.trim().length === 0;
+        };
+        field.addEventListener('input', update);
+        update();
+      })();
+    </script>
+  {{else}}
+    <h2>Sign in</h2>
+    <form method="post" action="/login">
+      <p>
         <label for="password">Password</label>
         <input id="password" name="password" type="password" autocomplete="current-password" required>
-        <button type="submit">Continue</button>
-      </form>
-    {{end}}
-  </section>
+      </p>
+      <button type="submit">Sign in</button>
+    </form>
+  {{end}}
 </main>
 </body>
 </html>`))
