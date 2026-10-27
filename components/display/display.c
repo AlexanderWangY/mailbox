@@ -23,8 +23,6 @@ static esp_lcd_panel_handle_t panel_handle = NULL;
 static esp_lcd_panel_io_handle_t io_handle = NULL;
 static const char *TAG = "display";
 
-static display_state_t state = DISPLAY_NORMAL;
-
 void display_init(void) {
   // Keep the panel dark until the initial screen has been selected.
   ESP_ERROR_CHECK(gpio_reset_pin(LCD_BACKLIGHT_GPIO));
@@ -58,7 +56,6 @@ void display_init(void) {
   ESP_ERROR_CHECK(esp_lcd_panel_reset(panel_handle));
   ESP_LOGI(TAG, "Initializing display panel.");
   ESP_ERROR_CHECK(esp_lcd_panel_init(panel_handle));
-  // holy shit this invert color thing was annoying to figure out I needed to do this.
   ESP_ERROR_CHECK(esp_lcd_panel_invert_color(panel_handle, true));
   ESP_LOGI(TAG, "Setting landscape orientation (480x320).");
   ESP_ERROR_CHECK(esp_lcd_panel_swap_xy(panel_handle, true));
@@ -109,38 +106,32 @@ void display_init(void) {
 }
 
 void display_sleep(void) {
-  ESP_LOGI(TAG, "Entering sleep; state=%d", (int)state);
   ESP_ERROR_CHECK(ledc_set_duty(LEDC_LOW_SPEED_MODE, LEDC_CHANNEL_0, 0));
   ESP_ERROR_CHECK(ledc_update_duty(LEDC_LOW_SPEED_MODE, LEDC_CHANNEL_0));
-  ESP_LOGI(TAG, "Backlight duty set to 0");
-  lvgl_port_stop();
-  ESP_LOGI(TAG, "LVGL timer stopped");
+  lvgl_port_lock(0);
+  ESP_ERROR_CHECK(lvgl_port_stop());
   ESP_ERROR_CHECK(esp_lcd_panel_disp_on_off(panel_handle, false));
-  ESP_LOGI(TAG, "Panel display disabled");
   ESP_ERROR_CHECK(esp_lcd_panel_disp_sleep(panel_handle, true));
-  state = DISPLAY_SLEEP;
+  lvgl_port_unlock();
   ESP_LOGI(TAG, "Display is now asleep");
 }
 
 void display_wake(void) {
+  lvgl_port_lock(0);
   ESP_ERROR_CHECK(esp_lcd_panel_disp_sleep(panel_handle, false));
   ESP_ERROR_CHECK(esp_lcd_panel_disp_on_off(panel_handle, true));
-  lvgl_port_resume();
-
-  if (lvgl_port_lock(0)) {
-    lv_obj_invalidate(lv_screen_active());
-    lvgl_port_unlock();
-  }
+  ESP_ERROR_CHECK(lvgl_port_resume());
+  lv_obj_invalidate(lv_screen_active());
+  lvgl_port_unlock();
 
   ESP_ERROR_CHECK(ledc_set_duty(LEDC_LOW_SPEED_MODE, LEDC_CHANNEL_0, 1023));
   ESP_ERROR_CHECK(ledc_update_duty(LEDC_LOW_SPEED_MODE, LEDC_CHANNEL_0));
-  state = DISPLAY_NORMAL;
   ESP_LOGI(TAG, "Display is now awake");
 }
 
 void display_dim(void) {
   // Use a clearly visible low brightness so the dim stage is easy to distinguish.
-  uint32_t duty = 1023 * 0.2;
+  uint32_t duty = 1023 / 5;
   ESP_LOGI(TAG, "Dimming backlight: duty=%lu", (unsigned long)duty);
   ESP_ERROR_CHECK(
     ledc_set_duty(LEDC_LOW_SPEED_MODE, LEDC_CHANNEL_0, duty)
@@ -149,9 +140,7 @@ void display_dim(void) {
   ESP_ERROR_CHECK(
     ledc_update_duty(LEDC_LOW_SPEED_MODE, LEDC_CHANNEL_0)
   );
-
-  state = DISPLAY_DIM;
-};
+}
 
 void display_normal(void) {
   uint32_t duty = 1023;
@@ -162,17 +151,5 @@ void display_normal(void) {
   ESP_ERROR_CHECK(
     ledc_update_duty(LEDC_LOW_SPEED_MODE, LEDC_CHANNEL_0)
   );
-
-  state = DISPLAY_NORMAL;
-};
-
-display_state_t display_state(void) {
-  return state;
 }
-
-void display_clear() {
-  lvgl_port_lock(0);
-  lv_obj_clean(lv_screen_active());
-  lvgl_port_unlock();
-};
 

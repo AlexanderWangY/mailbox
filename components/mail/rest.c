@@ -3,6 +3,7 @@
 #include <stdio.h>
 #include <string.h>
 #include <time.h>
+#include <stdatomic.h>
 
 #include "board.h"
 #include "esp_crt_bundle.h"
@@ -10,15 +11,19 @@
 #include "esp_heap_caps.h"
 #include "esp_log.h"
 #include "esp_netif_sntp.h"
+#include "esp_timer.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/queue.h"
+#include "freertos/semphr.h"
 #include "freertos/task.h"
+#include "lwip/sockets.h"
 
 #define REST_QUEUE_LENGTH 4
 #define REST_TASK_STACK_SIZE 8192
 #define REST_TASK_PRIORITY 4
 #define REST_HTTP_TIMEOUT_MS 10000
 #define REST_TIME_SYNC_TIMEOUT_MS 20000
+#define REST_REQUEST_TIMEOUT_US (30 * 1000000LL)
 #define DEVICE_TOKEN_BUFFER_SIZE 128
 #define AUTH_HEADER_BUFFER_SIZE (DEVICE_TOKEN_BUFFER_SIZE + 8)
 #define RESPONSE_BUFFER_SIZE 768
@@ -28,19 +33,23 @@ static const char *MAIL_NEXT_URL = "https://mailbox.awangyisu.com/api/mail/next"
 
 typedef struct {
   mail_rest_operation_t operation;
-  char mail_id[37];
+  mail_t mail;
 } rest_request_t;
 
 typedef struct {
   char body[RESPONSE_BUFFER_SIZE];
   size_t length;
   bool overflow;
+  bool cancellable;
 } response_buffer_t;
 
 static QueueHandle_t request_queue;
 static mail_rest_result_callback_t result_callback;
 static void *callback_context;
 static TaskHandle_t worker_task;
+static atomic_bool poll_canceled;
+static SemaphoreHandle_t socket_lock;
+static int poll_socket = -1;
 
 static bool valid_mail_id(const char *mail_id);
 
@@ -56,23 +65,38 @@ static esp_err_t add_auth_header(esp_http_client_handle_t client, char *header, 
   return esp_http_client_set_header(client, "Authorization", header);
 }
 
-static esp_err_t wait_for_clock_sync(void) {
-  // The SNTP wait semaphore is consumed by a waiter, while the synchronized
-  // system clock remains valid for subsequent requests.
-  if (time(NULL) >= 1704067200) return ESP_OK;
+static bool request_canceled(bool cancellable) {
+  return cancellable && atomic_load(&poll_canceled);
+}
 
-  esp_err_t err = esp_netif_sntp_sync_wait(pdMS_TO_TICKS(REST_TIME_SYNC_TIMEOUT_MS));
-  if (err == ESP_OK && time(NULL) < 1704067200) err = ESP_ERR_INVALID_STATE;
-  if (err != ESP_OK) {
-    ESP_LOGW(TAG, "Network time is not synchronized: %s", esp_err_to_name(err));
+static esp_err_t wait_for_clock_sync(bool cancellable) {
+  int64_t deadline = esp_timer_get_time() + REST_TIME_SYNC_TIMEOUT_MS * 1000LL;
+  while (time(NULL) < 1704067200) {
+    if (request_canceled(cancellable)) return ESP_ERR_INVALID_STATE;
+    if (esp_timer_get_time() >= deadline) return ESP_ERR_TIMEOUT;
+    esp_netif_sntp_sync_wait(pdMS_TO_TICKS(100));
   }
-  return err;
+  return ESP_OK;
 }
 
 static esp_err_t collect_response(esp_http_client_event_t *event) {
-  if (event->event_id != HTTP_EVENT_ON_DATA || event->user_data == NULL) return ESP_OK;
-
   response_buffer_t *response = event->user_data;
+  if (event->event_id == HTTP_EVENT_ON_CONNECTED) {
+    esp_http_client_set_timeout_ms(event->client, REST_HTTP_TIMEOUT_MS);
+    if (response->cancellable) {
+      xSemaphoreTake(socket_lock, portMAX_DELAY);
+      poll_socket = esp_http_client_get_socket(event->client);
+      if (atomic_load(&poll_canceled) && poll_socket >= 0) shutdown(poll_socket, SHUT_RDWR);
+      xSemaphoreGive(socket_lock);
+    }
+  } else if (event->event_id == HTTP_EVENT_DISCONNECTED && response->cancellable) {
+    // ESP-IDF dispatches this event before closing the socket. Clear the
+    // published descriptor first so cancellation cannot target a reused fd.
+    xSemaphoreTake(socket_lock, portMAX_DELAY);
+    poll_socket = -1;
+    xSemaphoreGive(socket_lock);
+  }
+  if (event->event_id != HTTP_EVENT_ON_DATA) return ESP_OK;
   if (event->data_len < 0 || (size_t)event->data_len >= sizeof(response->body) - response->length) {
     response->overflow = true;
     return ESP_OK;
@@ -86,8 +110,10 @@ static esp_err_t collect_response(esp_http_client_event_t *event) {
 
 static esp_err_t perform_request(const char *url, esp_http_client_method_t method,
                                  response_buffer_t *response, int *status_code) {
-  esp_err_t err = wait_for_clock_sync();
+  int64_t deadline = esp_timer_get_time() + REST_REQUEST_TIMEOUT_US;
+  esp_err_t err = wait_for_clock_sync(response->cancellable);
   if (err != ESP_OK) return err;
+  if (request_canceled(response->cancellable)) return ESP_ERR_INVALID_STATE;
 
   esp_http_client_config_t config = {
     .url = url,
@@ -95,7 +121,11 @@ static esp_err_t perform_request(const char *url, esp_http_client_method_t metho
     .event_handler = collect_response,
     .user_data = response,
     .crt_bundle_attach = esp_crt_bundle_attach,
-    .timeout_ms = REST_HTTP_TIMEOUT_MS,
+    // Yield between TCP/TLS connection steps so a background poll can stop
+    // before the handshake completes. Connected reads are interrupted below
+    // with shutdown(), while the worker remains the sole owner of the client.
+    .is_async = true,
+    .timeout_ms = 250,
     .buffer_size = 512,
     .buffer_size_tx = 256,
   };
@@ -108,13 +138,33 @@ static esp_err_t perform_request(const char *url, esp_http_client_method_t metho
   size_t largest_before = heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
   err = add_auth_header(client, auth_header, sizeof(auth_header));
   memset(auth_header, 0, sizeof(auth_header));
-  if (err == ESP_OK) err = esp_http_client_perform(client);
+  while (err == ESP_OK) {
+    if (request_canceled(response->cancellable)) {
+      err = ESP_ERR_INVALID_STATE;
+      break;
+    }
+    if (esp_timer_get_time() >= deadline) {
+      err = ESP_ERR_TIMEOUT;
+      break;
+    }
+    err = esp_http_client_perform(client);
+    if (err != ESP_ERR_HTTP_EAGAIN) break;
+    err = ESP_OK;
+    vTaskDelay(1);
+  }
   if (err == ESP_OK) *status_code = esp_http_client_get_status_code(client);
+  if (response->cancellable) {
+    xSemaphoreTake(socket_lock, portMAX_DELAY);
+    poll_socket = -1;
+    xSemaphoreGive(socket_lock);
+  }
   esp_http_client_cleanup(client);
 
   if (err != ESP_OK) {
-    ESP_LOGW(TAG, "HTTP request failed: %s; internal heap before TLS: free=%u largest=%u",
-             esp_err_to_name(err), (unsigned)free_before, (unsigned)largest_before);
+    if (!request_canceled(response->cancellable)) {
+      ESP_LOGW(TAG, "HTTP request failed: %s; internal heap before TLS: free=%u largest=%u",
+               esp_err_to_name(err), (unsigned)free_before, (unsigned)largest_before);
+    }
     return err;
   }
   if (response->overflow) return ESP_ERR_INVALID_SIZE;
@@ -226,7 +276,7 @@ static esp_err_t parse_mail_response(const response_buffer_t *response, mail_t *
 }
 
 static esp_err_t poll_mail(mail_t *mail, bool *has_mail) {
-  response_buffer_t response = {0};
+  response_buffer_t response = {.cancellable = true};
   int status_code = 0;
   esp_err_t err = perform_request(MAIL_NEXT_URL, HTTP_METHOD_GET, &response, &status_code);
   if (err != ESP_OK) return err;
@@ -287,13 +337,17 @@ static void mail_rest_worker(void *arg) {
 
     mail_rest_result_t result = {
       .operation = request.operation,
-      .error = ESP_OK,
-      .has_mail = false,
+      .mail = request.mail,
     };
     if (request.operation == MAIL_REST_POLL) {
       result.error = poll_mail(&result.mail, &result.has_mail);
     } else {
-      result.error = mark_mail_read(request.mail_id);
+      result.error = mark_mail_read(request.mail.id);
+    }
+    if (request.operation == MAIL_REST_POLL && atomic_load(&poll_canceled)) {
+      result.status = MAIL_REST_CANCELED;
+    } else {
+      result.status = result.error == ESP_OK ? MAIL_REST_SUCCEEDED : MAIL_REST_FAILED;
     }
     if (result_callback != NULL) result_callback(&result, callback_context);
   }
@@ -305,6 +359,12 @@ esp_err_t mail_rest_init(mail_rest_result_callback_t callback, void *context) {
 
   request_queue = xQueueCreate(REST_QUEUE_LENGTH, sizeof(rest_request_t));
   if (request_queue == NULL) return ESP_ERR_NO_MEM;
+  socket_lock = xSemaphoreCreateMutex();
+  if (socket_lock == NULL) {
+    vQueueDelete(request_queue);
+    request_queue = NULL;
+    return ESP_ERR_NO_MEM;
+  }
   result_callback = callback;
   callback_context = context;
 
@@ -312,6 +372,7 @@ esp_err_t mail_rest_init(mail_rest_result_callback_t callback, void *context) {
                                    NULL, REST_TASK_PRIORITY, &worker_task);
   if (created != pdPASS) {
     vQueueDelete(request_queue);
+    vSemaphoreDelete(socket_lock);
     request_queue = NULL;
     result_callback = NULL;
     callback_context = NULL;
@@ -322,14 +383,22 @@ esp_err_t mail_rest_init(mail_rest_result_callback_t callback, void *context) {
 
 esp_err_t mail_rest_poll_async(void) {
   if (request_queue == NULL) return ESP_ERR_INVALID_STATE;
+  atomic_store(&poll_canceled, false);
   rest_request_t request = {.operation = MAIL_REST_POLL};
   return xQueueSend(request_queue, &request, 0) == pdTRUE ? ESP_OK : ESP_ERR_TIMEOUT;
 }
 
-esp_err_t mail_rest_mark_read_async(const char *mail_id) {
+void mail_rest_cancel_poll(void) {
+  atomic_store(&poll_canceled, true);
+  xSemaphoreTake(socket_lock, portMAX_DELAY);
+  // shutdown interrupts a pending read without freeing the client's resources.
+  if (poll_socket >= 0) shutdown(poll_socket, SHUT_RDWR);
+  xSemaphoreGive(socket_lock);
+}
+
+esp_err_t mail_rest_mark_read_async(const mail_t *mail) {
   if (request_queue == NULL) return ESP_ERR_INVALID_STATE;
-  if (!valid_mail_id(mail_id)) return ESP_ERR_INVALID_ARG;
-  rest_request_t request = {.operation = MAIL_REST_MARK_READ};
-  strlcpy(request.mail_id, mail_id, sizeof(request.mail_id));
+  if (mail == NULL || !valid_mail_id(mail->id)) return ESP_ERR_INVALID_ARG;
+  rest_request_t request = {.operation = MAIL_REST_MARK_READ, .mail = *mail};
   return xQueueSend(request_queue, &request, 0) == pdTRUE ? ESP_OK : ESP_ERR_TIMEOUT;
 }

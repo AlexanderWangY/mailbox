@@ -1,5 +1,5 @@
 idf_component_register(
-  SRCS "board.c"
+  SRCS "board.c" "battery.c"
   INCLUDE_DIRS "include"
   REQUIRES
     freertos
@@ -11,5 +11,6 @@ idf_component_register(
     esp_wifi
     esp_event
     esp_netif
+    esp_adc
     haptic
 )

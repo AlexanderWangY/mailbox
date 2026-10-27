@@ -1,5 +1,6 @@
 #include <stddef.h>
 #include <stdint.h>
+#include <stdio.h>
 
 #include "esp_log.h"
 #include "esp_lvgl_port.h"
@@ -10,6 +11,7 @@
 #include "include/lvgl/display/lv_display.h"
 #include "include/lvgl/draw/lv_image_dsc.h"
 #include "include/lvgl/font/lv_font.h"
+#include "include/lvgl/font/lv_symbol_def.h"
 #include "include/lvgl/widgets/lv_gif.h"
 #include "include/lvgl/widgets/lv_image.h"
 #include "include/lvgl/widgets/lv_label.h"
@@ -20,8 +22,8 @@ static const char *TAG = "ui";
 static lv_obj_t *empty_screen;
 static lv_obj_t *mail_screen;
 static lv_obj_t *reading_screen;
-static lv_obj_t *debug_screen;
 static lv_obj_t *reading_message_label;
+static lv_obj_t *battery_status_label;
 
 extern const uint8_t mail_rgb565_start[] asm("_binary_Mail_rgb565_start");
 extern const uint8_t mail_rgb565_end[] asm("_binary_Mail_rgb565_end");
@@ -156,6 +158,12 @@ static void setup_empty_screen(void) {
   lv_obj_set_style_text_color(empty_label, lv_color_white(), 0);
   lv_obj_set_style_text_font(empty_label, &lv_font_montserrat_20, 0);
   lv_obj_align(empty_label, LV_ALIGN_TOP_MID, 0, 258);
+
+  battery_status_label = lv_label_create(empty_screen);
+  lv_obj_set_style_text_color(battery_status_label, lv_color_white(), 0);
+  lv_obj_set_style_text_font(battery_status_label, &lv_font_montserrat_20, 0);
+  lv_obj_align(battery_status_label, LV_ALIGN_TOP_RIGHT, -12, 8);
+  lv_obj_set_hidden(battery_status_label, true);
 }
 
 static void setup_reading_screen(void) {
@@ -199,7 +207,6 @@ void ui_init(void) {
   empty_screen = lv_obj_create(NULL);
   mail_screen = lv_obj_create(NULL);
   reading_screen = lv_obj_create(NULL);
-  debug_screen = lv_obj_create(NULL);
   setup_mail_screen();
   setup_empty_screen();
   setup_reading_screen();
@@ -235,4 +242,23 @@ void ui_set_reading_message(const char *text) {
     }
     lvgl_port_unlock();
   }
+}
+
+void ui_set_battery_status(int percent, bool charging) {
+  if (percent > 100 || !lvgl_port_lock(0)) {
+    return;
+  }
+
+  if (battery_status_label != NULL) {
+    if (percent < 0) {
+      lv_obj_set_hidden(battery_status_label, true);
+    } else {
+      char status[24];
+      snprintf(status, sizeof(status), charging ? "%d%% " LV_SYMBOL_CHARGE : "%d%%",
+               percent);
+      lv_label_set_text(battery_status_label, status);
+      lv_obj_set_hidden(battery_status_label, false);
+    }
+  }
+  lvgl_port_unlock();
 }

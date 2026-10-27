@@ -6,3 +6,6 @@ setup:
 
 flash:
 	idf.py flash
+
+test:
+	sh tests/run.sh
